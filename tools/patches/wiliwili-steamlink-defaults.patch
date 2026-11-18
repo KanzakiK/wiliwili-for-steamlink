@@ -1,0 +1,70 @@
+diff --git a/wiliwili/source/utils/config_helper.cpp b/wiliwili/source/utils/config_helper.cpp
+--- a/wiliwili/source/utils/config_helper.cpp
++++ b/wiliwili/source/utils/config_helper.cpp
+@@ -200,13 +200,13 @@
+ #else
+     {SettingItem::PLAYER_HWDEC, {"player_hwdec", {}, {}, 0}},
+ #endif
+     {SettingItem::PLAYER_HWDEC_CUSTOM, {"player_hwdec_custom", {}, {}, 0}},
+     {SettingItem::PLAYER_EXIT_FULLSCREEN_ON_END, {"player_exit_fullscreen_on_end", {}, {}, 1}},
+     {SettingItem::PLAYER_WINDOW_FULLSCREEN_ON_APP_FULLSCREEN, {"player_window_fullscreen_on_app_fullscreen", {}, {}, 0}},
+-    {SettingItem::PLAYER_AUTO_FULLSCREEN, {"player_auto_fullscreen", {}, {}, 0}},
++    {SettingItem::PLAYER_AUTO_FULLSCREEN, {"player_auto_fullscreen", {}, {}, 1}}, // SteamLinkDefaults
+     {SettingItem::PLAYER_OSD_TV_MODE, {"player_osd_tv_mode", {}, {}, 0}},
+     {SettingItem::OPENCC_ON, {"opencc", {}, {}, 1}},
+     {SettingItem::DANMAKU_ON, {"danmaku", {}, {}, 1}},
+@@ -208,7 +208,8 @@
+     {SettingItem::DANMAKU_FILTER_SCROLL, {"danmaku_filter_scroll", {}, {}, 1}},
+     {SettingItem::DANMAKU_FILTER_COLOR, {"danmaku_filter_color", {}, {}, 1}},
+     {SettingItem::DANMAKU_FILTER_ADVANCED, {"danmaku_filter_advanced", {}, {}, 0}},
+-    {SettingItem::DANMAKU_SMART_MASK, {"danmaku_smart_mask", {}, {}, 1}},
++    // SteamLinkDefaults: 关闭智能弹幕遮罩，降低单核 UI 负担
++    {SettingItem::DANMAKU_SMART_MASK, {"danmaku_smart_mask", {}, {}, 0}},
+     {SettingItem::SEARCH_TV_MODE, {"search_tv_mode", {}, {}, 1}},
+     {SettingItem::HTTP_PROXY_STATUS, {"http_proxy_status", {}, {}, 0}},
+     {SettingItem::TLS_VERIFY,
+@@ -216,7 +217,7 @@
+ #if defined(__PSV__) || defined(__SWITCH__) || defined(PS4)
+       0}},
+ #else
+-      1}},
++      0}}, // SteamLinkDefaults: 设备时间可能回到 1970，避免 CDN 证书校验失败
+ #endif
+ 
+     /// number
+@@ -225,10 +226,10 @@
+ #else
+     {SettingItem::PLAYER_INMEMORY_CACHE,
+-     {"player_inmemory_cache", {"0MB", "10MB", "20MB", "50MB", "100MB"}, {0, 10, 20, 50, 100}, 1}},
++     {"player_inmemory_cache", {"0MB", "10MB", "20MB", "50MB", "100MB"}, {0, 10, 20, 50, 100}, 0}}, // SteamLinkDefaults
+ #endif
+     {
+         SettingItem::PLAYER_DEFAULT_SPEED,
+         {"player_default_speed",
+          {"4.0x", "3.0x", "2.0x", "1.75x", "1.5x", "1.25x", "1.0x", "0.75x", "0.5x", "0.25x"},
+          {400, 300, 200, 175, 150, 125, 100, 75, 50, 25},
+-         2},
++         6}, // SteamLinkDefaults: 1.0x，倍速入口隐藏后弹幕倍率保持正常
+     },
+     {SettingItem::PLAYER_VOLUME, {"player_volume", {}, {}, 0}},
+-    {SettingItem::TEXTURE_CACHE_NUM, {"texture_cache_num", {}, {}, 0}},
++    {SettingItem::TEXTURE_CACHE_NUM, {"texture_cache_num", {}, {}, 100}}, // SteamLinkDefaults
+     {SettingItem::VIDEO_QUALITY, {"video_quality", {}, {}, 116}},
+@@ -252,7 +253,7 @@
+       {"1", "2", "3", "4", "8", "12", "16"},
+       {1, 2, 3, 4, 8, 12, 16},
+-      3}},
++      0}}, // SteamLinkDefaults: 单核设备只用 1 个图片请求线程
+ #endif
+     {SettingItem::VIDEO_FORMAT, {"file_format", {"Dash (AVC/HEVC/AV1)", "FLV/MP4"}, {4048, 0}, 0}},
+     {SettingItem::VIDEO_CODEC, {"video_codec", {"AVC/H.264"}, {7}, 0}},
+@@ -576,7 +577,7 @@
+     // 加载完成后自动播放
+     MPVCore::AUTO_PLAY = getBoolOption(SettingItem::PLAYER_AUTO_PLAY);
+ 
+     // 初始化默认的倍速设定
+-    MPVCore::VIDEO_SPEED = getIntOption(SettingItem::PLAYER_DEFAULT_SPEED);
++    MPVCore::VIDEO_SPEED = 100; // SteamLinkDefaults: 倍速入口隐藏，固定 1.0x 避免弹幕倍率错误
+ 
+     // 初始化视频比例
+     MPVCore::VIDEO_ASPECT = getSettingItem(SettingItem::PLAYER_ASPECT, std::string{"-1"});

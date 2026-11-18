@@ -141,6 +141,15 @@ if [ -f "$BOTTOM_BAR_GUARD_PATCH" ] && [ -d "$SOURCE/.git" ]; then
     fi
 fi
 
+# Steam Link 默认值：图片线程/缓存、TLS、自动全屏、弹幕倍率等按真机配置固化。
+STEAM_DEFAULTS_PATCH="$PROJECT_DIR/tools/patches/wiliwili-steamlink-defaults.patch"
+if [ -f "$STEAM_DEFAULTS_PATCH" ] && [ -d "$SOURCE/.git" ]; then
+    if ! grep -q 'SteamLinkDefaults' "$SOURCE/wiliwili/source/utils/config_helper.cpp" 2>/dev/null; then
+        echo "apply wiliwili Steam Link defaults patch"
+        git -C "$SOURCE" apply --recount "$STEAM_DEFAULTS_PATCH"
+    fi
+fi
+
 # 4) wiliwili 整仓
 # -U OPENSSL_*：让 FindOpenSSL.cmake（tools/cmake）重新生效，避免 sysroot 绝对路径进入 DT_NEEDED
 cmake -S "$SOURCE" -B "$BUILD" \
