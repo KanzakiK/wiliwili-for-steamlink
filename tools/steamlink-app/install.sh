@@ -1,6 +1,6 @@
 #!/bin/sh
 #
-# 安装/更新 Steam Link 主菜单的 Bilibili 启动入口（阶段 3.5a）
+# 安装/更新 Steam Link 主菜单的 wiliwili 启动入口（阶段 3.5a）
 #
 # 机制（与 /home/apps/moonlight 一致）：
 #   shell 扫描 /home/apps/<dir>/toc.txt 生成主菜单图标；
@@ -8,17 +8,17 @@
 #   并 eval 执行 toc.txt 里的 run= 脚本。
 #
 # 本脚本只做增量安装，不动 shell.sh / rc.local / moonlight：
-#   /home/apps/bilibili/
-#     toc.txt  bilibili.png  bilibili.sh
+#   /home/apps/wiliwili/
+#     toc.txt  wiliwili.png  wiliwili.sh
 #     bin/{wiliwili,slplayer_daemon}
 #     resources/
-#   /usr/local/bilibili/    <- HOME（持久化，保存 B 站登录态）
+#   /usr/local/wiliwili/    <- HOME（持久化，保存 B 站登录态）
 #
 # 用法（在 WSL 里）：
 #   DEVICE=root@<设备地址> PASS=<设备密码> sh tools/steamlink-app/install.sh
 #
 # 卸载：
-#   ssh root@<设备> "rm -rf /home/apps/bilibili /usr/local/bilibili"
+#   ssh root@<设备> "rm -rf /home/apps/wiliwili /usr/local/wiliwili"
 set -e
 
 DEVICE=${DEVICE:-}
@@ -27,7 +27,7 @@ if [ -z "$DEVICE" ] || [ -z "$PASS" ]; then
     echo "请先设置 DEVICE 和 PASS 环境变量（不要写入仓库）" >&2
     exit 1
 fi
-APP_NAME=${APP_NAME:-bilibili}
+APP_NAME=${APP_NAME:-wiliwili}
 APP_DIR=/home/apps/$APP_NAME
 APP_HOME=/usr/local/$APP_NAME
 WILI_BUILD=${WILI_BUILD:-$HOME/build-wiliwili}
@@ -48,8 +48,8 @@ echo "== 2/6 创建目录 =="
 $SSH "mkdir -p $APP_DIR/bin $APP_HOME"
 
 echo "== 3/6 部署小文件（toc/脚本/图标）=="
-$SCP "$HERE/toc.txt" "$HERE/bilibili.sh" "$HERE/bilibili.png" "$DEVICE:$APP_DIR/"
-$SSH "chmod 755 $APP_DIR/bilibili.sh $APP_DIR/bilibili.png"
+$SCP "$HERE/toc.txt" "$HERE/wiliwili.sh" "$HERE/wiliwili.png" "$DEVICE:$APP_DIR/"
+$SSH "chmod 755 $APP_DIR/wiliwili.sh $APP_DIR/wiliwili.png"
 
 echo "== 4/6 部署二进制 =="
 # 先传临时名再原子替换：正在运行的二进制可以直接被 rename 覆盖，
@@ -61,10 +61,10 @@ $SSH "chmod 755 $APP_DIR/bin/wiliwili.new $APP_DIR/bin/slplayer_daemon.new && \
       mv -f $APP_DIR/bin/slplayer_daemon.new $APP_DIR/bin/slplayer_daemon"
 
 echo "== 5/6 部署资源（tar，避免 scp -r 在设备端报 realpath）=="
-tar czf /tmp/bilibili_res.tar.gz -C "$WILI_BUILD" resources
-$SCP /tmp/bilibili_res.tar.gz "$DEVICE:/tmp/"
-$SSH "cd $APP_DIR && tar xzf /tmp/bilibili_res.tar.gz && rm -f /tmp/bilibili_res.tar.gz"
-rm -f /tmp/bilibili_res.tar.gz
+tar czf /tmp/wiliwili_res.tar.gz -C "$WILI_BUILD" resources
+$SCP /tmp/wiliwili_res.tar.gz "$DEVICE:/tmp/"
+$SSH "cd $APP_DIR && tar xzf /tmp/wiliwili_res.tar.gz && rm -f /tmp/wiliwili_res.tar.gz"
+rm -f /tmp/wiliwili_res.tar.gz
 
 echo "== 6/6 检查设备内存与 /tmp 占用 =="
 # 设备只有 269MB 内存且无 swap，/tmp 是 tmpfs（内存盘）——往 /tmp 放东西

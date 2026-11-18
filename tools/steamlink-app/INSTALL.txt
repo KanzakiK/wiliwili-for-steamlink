@@ -1,0 +1,15 @@
+wiliwili for Steam Link
+=======================
+
+1. Copy the "wiliwili" directory in this package to /home/apps/ on Steam Link.
+2. Make the launcher executable:
+     chmod 755 /home/apps/wiliwili/wiliwili.sh /home/apps/wiliwili/bin/*
+3. Restart the Steam Link main menu or reboot the device.
+4. Select the wiliwili icon from the main menu.
+
+Application files: /home/apps/wiliwili/
+Persistent config: /usr/local/wiliwili/.config/wiliwili/
+Log:               /tmp/wiliwili.log
+
+Do not place binaries, resources or test videos in /tmp; it is tmpfs and
+consumes system memory on Steam Link.
