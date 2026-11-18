@@ -1,5 +1,7 @@
 # wiliwili for Steam Link
 
+[English](README_EN.md)
+
 这是一个把 [wiliwili](https://github.com/xfangfang/wiliwili) 的 UI/API 移植到 Steam Link 的实验性分支。它复用 wiliwili 的界面与 B 站业务层，但把播放内核替换为 Steam Link 原生 SLVideo/SLAudio，并在 wiliwili 与播放器之间加入 libmpv 兼容层和独立 IPC daemon。
 
 本分支不是 wiliwili 上游的正式发行版，也不引入 mpv 本体；它只在本仓库内通过构建期补丁替换播放相关胶水，不重写 UI、不修改 wiliwili 布局或样式。
