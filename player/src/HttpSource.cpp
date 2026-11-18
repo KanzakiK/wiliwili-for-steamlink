@@ -1,6 +1,7 @@
 #include "HttpSource.h"
 
 #include <algorithm>
+#include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -25,6 +26,8 @@ constexpr size_t kAvioBufferSize = 64 * 1024;
 constexpr size_t kStreamBufferLimit = 8 * 1024 * 1024;
 constexpr size_t kStreamChunkSize = 256 * 1024;
 constexpr size_t kStreamBackKeep = 512 * 1024;
+constexpr int kDownloadMaxRetries = 2;
+constexpr int kDownloadRetryBaseDelayMs = 250;
 
 bool isRemoteUrl(const std::string& url) {
     return url.compare(0, 7, "http://") == 0 || url.compare(0, 8, "https://") == 0;
@@ -223,12 +226,29 @@ private:
     static size_t writeCallback(char* ptr, size_t size, size_t nmemb, void* opaque) {
         auto* self = static_cast<Downloader*>(opaque);
         size_t bytes = size * nmemb;
+        {
+            std::lock_guard<std::mutex> lock(self->mutex_);
+            if (self->rejectRangeBody_)
+                return 0;
+        }
         return self->append((const uint8_t*)ptr, bytes) == 0 ? bytes : 0;
     }
 
     static size_t headerCallback(char* ptr, size_t size, size_t nmemb, void* opaque) {
         auto* self = static_cast<Downloader*>(opaque);
         size_t bytes = size * nmemb;
+        std::string line(ptr, bytes);
+        if (line.compare(0, 5, "HTTP/") == 0) {
+            size_t space = line.find(' ');
+            int status = space == std::string::npos ? 0 : atoi(line.c_str() + space + 1);
+            if (status >= 200) {
+                std::lock_guard<std::mutex> lock(self->mutex_);
+                if (self->expectRangeStatus_ && status != 206) {
+                    self->rejectRangeBody_ = true;
+                    fprintf(stderr, "[SlHttp] Range 未被接受: HTTP %d\n", status);
+                }
+            }
+        }
         if (bytes > 15 && strncasecmp(ptr, "Content-Length:", 15) == 0) {
             /* Range 响应的 Content-Length 是剩余长度，不是整片长度。 */
             std::lock_guard<std::mutex> lock(self->mutex_);
@@ -256,71 +276,105 @@ private:
     }
 
     void run() {
-        CURL* curl = curl_easy_init();
-        if (!curl) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            error_ = true;
-            eof_ = true;
-            cond_.notify_all();
-            return;
-        }
-
-        curl_easy_setopt(curl, CURLOPT_URL, url_.c_str());
-        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-        if (!userAgent_.empty())
-            curl_easy_setopt(curl, CURLOPT_USERAGENT, userAgent_.c_str());
-        if (!referrer_.empty())
-            curl_easy_setopt(curl, CURLOPT_REFERER, referrer_.c_str());
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, this);
-        curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, headerCallback);
-        curl_easy_setopt(curl, CURLOPT_HEADERDATA, this);
-        curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 20L);
-        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
-        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 30L);
-        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
-        curl_easy_setopt(curl, CURLOPT_PROGRESSFUNCTION, progressCallback);
-        curl_easy_setopt(curl, CURLOPT_PROGRESSDATA, this);
-        std::string rangeHeader;
-        bool rangeRequest = false;
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (rangeStart_ > 0) {
-                char buf[64];
-                snprintf(buf, sizeof(buf), "%lld-", (long long)rangeStart_);
-                rangeHeader = buf;
-                rangeRequest = true;
+        for (int attempt = 0; attempt <= kDownloadMaxRetries; ++attempt) {
+            CURL* curl = curl_easy_init();
+            if (!curl) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                error_ = true;
+                errorMessage_ = "curl init failed";
+                eof_ = true;
+                cond_.notify_all();
+                return;
             }
-        }
-        if (!rangeHeader.empty())
-            curl_easy_setopt(curl, CURLOPT_RANGE, rangeHeader.c_str());
 
-        CURLcode result = curl_easy_perform(curl);
+            curl_easy_setopt(curl, CURLOPT_URL, url_.c_str());
+            curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+            if (!userAgent_.empty())
+                curl_easy_setopt(curl, CURLOPT_USERAGENT, userAgent_.c_str());
+            if (!referrer_.empty())
+                curl_easy_setopt(curl, CURLOPT_REFERER, referrer_.c_str());
+            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
+            curl_easy_setopt(curl, CURLOPT_WRITEDATA, this);
+            curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, headerCallback);
+            curl_easy_setopt(curl, CURLOPT_HEADERDATA, this);
+            curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+            curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 20L);
+            curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, 1L);
+            curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, 30L);
+            curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+            curl_easy_setopt(curl, CURLOPT_PROGRESSFUNCTION, progressCallback);
+            curl_easy_setopt(curl, CURLOPT_PROGRESSDATA, this);
 
-        long httpStatus = 0;
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpStatus);
-
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            if (result != CURLE_OK && !stop_) {
-                fprintf(stderr, "[SlHttp] 下载失败: %s\n", curl_easy_strerror(result));
-                error_ = true;
-                errorMessage_ = curl_easy_strerror(result);
-            } else if (httpStatus >= 400 && !stop_) {
-                fprintf(stderr, "[SlHttp] HTTP %ld\n", httpStatus);
-                error_ = true;
-                errorMessage_ = "HTTP error";
-            } else if (rangeRequest && httpStatus != 206 && !stop_) {
-                /* CDN 忽略 Range 时会从 0 返回完整文件，按目标偏移接窗口会读错数据。 */
-                fprintf(stderr, "[SlHttp] Range 请求未返回 206: %ld\n", httpStatus);
-                error_ = true;
-                errorMessage_ = "Range unsupported";
+            std::string rangeHeader;
+            bool rangeRequest = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                int64_t resumeFrom = attempt == 0 ? rangeStart_ : endOffset_;
+                if (resumeFrom > 0) {
+                    char buf[64];
+                    snprintf(buf, sizeof(buf), "%lld-", (long long)resumeFrom);
+                    rangeHeader = buf;
+                    rangeRequest = true;
+                }
+                expectRangeStatus_ = rangeRequest;
+                rejectRangeBody_ = false;
+                error_ = false;
+                eof_ = false;
             }
-            eof_ = true;
-            cond_.notify_all();
+            if (!rangeHeader.empty())
+                curl_easy_setopt(curl, CURLOPT_RANGE, rangeHeader.c_str());
+
+            CURLcode result = curl_easy_perform(curl);
+            long httpStatus = 0;
+            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpStatus);
+            curl_easy_cleanup(curl);
+
+            bool shouldRetry = false;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                expectRangeStatus_ = false;
+                rejectRangeBody_ = false;
+                if (stop_)
+                    break;
+                bool rangeRejected = rangeRequest && httpStatus != 206;
+                if (result == CURLE_OK && !rangeRejected && httpStatus < 400) {
+                    eof_ = true;
+                    cond_.notify_all();
+                    return;
+                }
+                if (attempt < kDownloadMaxRetries) {
+                    /* 已下载的 chunk 保留；下次从窗口末尾续传，已排队读取不受影响。 */
+                    fprintf(stderr,
+                            "[SlHttp] 传输中断: %s / HTTP %ld，从 %lld 续传 %d/%d\n",
+                            curl_easy_strerror(result), httpStatus,
+                            (long long)endOffset_, attempt + 1, kDownloadMaxRetries);
+                    error_ = false;
+                    eof_ = false;
+                    cond_.notify_all();
+                    shouldRetry = true;
+                } else {
+                    if (result != CURLE_OK) {
+                        fprintf(stderr, "[SlHttp] 下载失败: %s\n",
+                                curl_easy_strerror(result));
+                        errorMessage_ = curl_easy_strerror(result);
+                    } else if (httpStatus >= 400) {
+                        fprintf(stderr, "[SlHttp] HTTP %ld\n", httpStatus);
+                        errorMessage_ = "HTTP error";
+                    } else {
+                        fprintf(stderr, "[SlHttp] Range 请求未返回 206: %ld\n",
+                                httpStatus);
+                        errorMessage_ = "Range unsupported";
+                    }
+                    error_ = true;
+                    eof_ = true;
+                    cond_.notify_all();
+                    return;
+                }
+            }
+            if (shouldRetry)
+                std::this_thread::sleep_for(std::chrono::milliseconds(
+                    kDownloadRetryBaseDelayMs * (attempt + 1)));
         }
-        curl_easy_cleanup(curl);
     }
 
     int append(const uint8_t* data, size_t bytes) {
@@ -407,6 +461,8 @@ private:
     bool eof_ = false;
     bool error_ = false;
     bool stop_ = false;
+    bool expectRangeStatus_ = false;
+    bool rejectRangeBody_ = false;
     bool debug_ = false;
 };
 

@@ -2,7 +2,7 @@
  * 单条媒体 URL 的下载 + 解封装。
  *
  * 远程 URL：libcurl 后台下载到 8MB 滑动窗口，自定义 AVIO 喂给 FFmpeg，
- * 支持在窗口内 seek；本地文件直接交给 avformat。
+ * 支持在窗口内 seek；传输中断时从当前窗口末尾 Range 续传；本地文件直接交给 avformat。
  */
 #pragma once
 
