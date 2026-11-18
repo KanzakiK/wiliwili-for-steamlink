@@ -150,6 +150,33 @@ if [ -f "$STEAM_DEFAULTS_PATCH" ] && [ -d "$SOURCE/.git" ]; then
     fi
 fi
 
+# 降低 NanoVG 字形图集上限，避免满弹幕时申请 51.84MB SHM 连续块。
+ATLAS_CAP_PATCH="$PROJECT_DIR/tools/patches/borealis-nanovg-atlas-cap.patch"
+if [ -f "$ATLAS_CAP_PATCH" ] && [ -e "$SOURCE/library/borealis/.git" ]; then
+    if ! grep -q 'SteamLinkAtlasCap' "$SOURCE/library/borealis/library/lib/extern/nanovg/nanovg.c" 2>/dev/null; then
+        echo "apply borealis nanovg atlas cap patch"
+        git -C "$SOURCE/library/borealis" apply --recount "$ATLAS_CAP_PATCH"
+    fi
+fi
+
+# 弹幕显示区域默认 1/4，但保留 1/2、3/4、全屏选项供用户自行选择。
+DANMAKU_DEFAULT_PATCH="$PROJECT_DIR/tools/patches/wiliwili-danmaku-area-default.patch"
+if [ -f "$DANMAKU_DEFAULT_PATCH" ] && [ -d "$SOURCE/.git" ]; then
+    if ! grep -q 'SteamLinkDanmakuDefault' "$SOURCE/wiliwili/source/utils/config_helper.cpp" 2>/dev/null; then
+        echo "apply wiliwili danmaku area default patch"
+        git -C "$SOURCE" apply --recount "$DANMAKU_DEFAULT_PATCH"
+    fi
+fi
+
+# 弹幕字体默认纯色，避免描边档的二次文本绘制和字形膨胀；用户仍可切回描边/阴影/斜体。
+DANMAKU_FONT_DEFAULT_PATCH="$PROJECT_DIR/tools/patches/wiliwili-danmaku-font-default.patch"
+if [ -f "$DANMAKU_FONT_DEFAULT_PATCH" ] && [ -d "$SOURCE/.git" ]; then
+    if ! grep -q 'SteamLinkDanmakuFontDefault' "$SOURCE/wiliwili/source/utils/config_helper.cpp" 2>/dev/null; then
+        echo "apply wiliwili danmaku font default patch"
+        git -C "$SOURCE" apply --recount "$DANMAKU_FONT_DEFAULT_PATCH"
+    fi
+fi
+
 # 4) wiliwili 整仓
 # -U OPENSSL_*：让 FindOpenSSL.cmake（tools/cmake）重新生效，避免 sysroot 绝对路径进入 DT_NEEDED
 cmake -S "$SOURCE" -B "$BUILD" \
