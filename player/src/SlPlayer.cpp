@@ -32,6 +32,9 @@ namespace sl {
 namespace {
 
 constexpr unsigned kVideoQueueMaxMs = 4000;
+/* 队列反压期间不喂帧，watchdog 必须挂起；但只给有限时间，
+ * 防止 VPU 真死锁时永久卡在 loading。 */
+constexpr std::int64_t kBackpressureWatchdogSuspendMs = 30000;
 /* ---- VPU 鲁棒性参数（第 1 步：事前防御 + Dirty Flag）---- */
 /* 脏退出标记：起调前写、正常退出（FreeContext 之后）删；残留 = 上次异常退出 */
 constexpr const char* kVpuDirtyFlagPath = "/tmp/slplayer_vpu.lock";
@@ -219,6 +222,8 @@ struct Player::Impl {
         pauseFlushed_ = false;
         resumeSeek_ = false;
         resumeInProgress_ = false;
+        fatalMask_ = 0;
+        backpressure_ = false;
         lastStreamRebuildMs_ = 0;
         position_ = spec.startSeconds > 0.0 ? spec.startSeconds : 0.0;
         duration_ = spec.endSeconds > 0.0 ? spec.endSeconds : 0.0;
@@ -363,7 +368,10 @@ struct Player::Impl {
                           pauseFlush_.load() ||
                           pauseFlushed_.load() || resumeSeek_.load() ||
                           resumeInProgress_.load() ||
-                          hb.seeking;
+                          hb.seeking || awaitingFirstFrame_.load() ||
+                          (backpressure_.load() &&
+                           steadyNowMs() - backpressureSinceMs_.load() <
+                               kBackpressureWatchdogSuspendMs);
         return hb;
     }
 
@@ -395,6 +403,12 @@ struct Player::Impl {
 
     /* VPU 致命错误上报：与 emit 同样保护，回调异常不穿透播放线程 */
     void emitFatal(FatalType type, const std::string& message) {
+        /* 同一类 fatal 在一次播放中只上报一次。BeginFrame 失败后每帧都会
+         * 重试 500ms，旧行为每 0.5s 向上报一次，兼容层每次都关闭透明层并
+         * 发 END_FILE(ERROR)，用户看到白屏且 watchdog 被停用。 */
+        int bit = 1 << (int)type;
+        if (fatalMask_.fetch_or(bit) & bit)
+            return;
         FatalCallback cb;
         {
             std::lock_guard<std::mutex> lock(mutex);
@@ -424,6 +438,9 @@ struct Player::Impl {
     mutable std::mutex mutex;
     EventCallback callback;
     FatalCallback fatalCallback;
+    std::atomic<int> fatalMask_{0};
+    std::atomic<bool> backpressure_{false};
+    std::atomic<std::int64_t> backpressureSinceMs_{0};
     SourceSpec spec_;
 
     HttpSource videoSource_;
@@ -439,6 +456,7 @@ struct Player::Impl {
     std::atomic<bool> pauseFlushed_{false};
     std::atomic<bool> resumeSeek_{false};
     std::atomic<bool> resumeInProgress_{false};
+    std::atomic<bool> awaitingFirstFrame_{false};
     std::atomic<std::int64_t> lastStreamRebuildMs_{0};
     std::atomic<bool> seeking_{false};
     std::atomic<double> resumeTarget_{0.0};
@@ -468,7 +486,6 @@ void Player::Impl::run() {
         std::lock_guard<std::mutex> lock(mutex);
         spec = spec_;
     }
-
     CSLVideoContext* videoContext = nullptr;
     CSLVideoStream* videoStream = nullptr;
     CSLAudioContext* audioContext = nullptr;
@@ -684,7 +701,6 @@ void Player::Impl::run() {
             "[SlPlayer][media] %s audio=%zu duration=%.3f %dx%d fps=%.3f\n",
             sourceTag(spec.videoUrl).c_str(), spec.audioUrls.size(), duration,
             info_.width, info_.height, fps);
-
     /* 前置 SPS 门禁：只降 refs，默认保留 reorder/buffering。
      * 实测 7->4 refs 可避免高参考帧片源在 seek 后 VDEC SHM 分配失败；
      * 同时压低 reorder/buffering 会截断 B 帧重排，出现花屏/抽动。 */
@@ -821,7 +837,8 @@ void Player::Impl::run() {
             return;
         SLVideo_SetStreamTargetFramerate(videoStream, (unsigned)frameRate.num,
                                          (unsigned)frameRate.den);
-        SLVideo_SetStreamTargetBitrate(videoStream, 1000);
+        /* Kodi/Moonlight 均不设置目标码率；1000 kbit/s 固定值和按 bw 换算
+         * 都已在真机上复现问题，这里保持 SDK 默认值。 */
     };
     applyStreamParams();
     fprintf(stderr, "[SlPlayer] SLVideo stream 就绪\n");
@@ -832,6 +849,9 @@ void Player::Impl::run() {
      * 延时值是保守默认（50ms），待真机对照校准（见 06 文档第九节）。
      */
     auto rebuildStream = [&]() -> bool {
+        /* watchdog 在 first frame 到达前必须挂起：FreeStream/CreateStream 期间
+         * 队列不增长，但此时 transition 已经归零，真机会在 1.5s 后被误杀。 */
+        awaitingFirstFrame_.store(true);
         std::int64_t last = lastStreamRebuildMs_.load();
         std::int64_t now = steadyNowMs();
         if (last > 0 && now - last < kSeekRebuildMinGapMs)
@@ -913,9 +933,14 @@ void Player::Impl::run() {
 
     auto doSeek = [&](double target, std::uint64_t requestId,
                       bool rebuildVideo = true) -> bool {
+        /* 本次 open 或上一次重建后还没有帧提交时，VPU 队列本来就是空的。
+         * wiliwili 在 FILE_LOADED 前后送来的续播 seek 会走这里；再 Free/Create
+         * 一次只会增加高 refs 片源的 SHM 碎片，现场已多次观察到紧随其后的黑屏。 */
+        const bool canSkipRebuild = !rebuildVideo || !videoStarted;
         seeking_ = true;
         pauseFlushed_ = false;
         resumeSeek_ = false;
+        backpressure_ = false;
         if (duration > 0.0)
             target = std::min(target, std::max(0.0, duration - 0.1));
         if (target < 0.0)
@@ -970,7 +995,7 @@ void Player::Impl::run() {
 
         /* 新建流后尚未提交帧、或暂停已 flush 过时，不需要再 Free/Create 一次；
          * 高 refs 片源每次重建都会消耗 VPU/SHM 连续块，频繁重建会触发 shm_driver 失败。 */
-        if (rebuildVideo) {
+        if (!canSkipRebuild) {
             if (!rebuildStream()) {
                 emitFatal(FatalType::VpuRebuildFailed, "seek 后重建 SLVideo stream 失败");
                 emit(EventType::Error, "seek 后重建 SLVideo stream 失败");
@@ -1007,7 +1032,26 @@ void Player::Impl::run() {
     if (spec.startSeconds > 0.5)
         doSeek(spec.startSeconds, 0, false);
 
+    const bool playDiag = std::getenv("SL_PLAY_DIAG") != nullptr;
+    auto lastDiag = std::chrono::steady_clock::now();
     while (!stop_) {
+        if (playDiag) {
+            auto diagNow = std::chrono::steady_clock::now();
+            if (diagNow - lastDiag >= std::chrono::seconds(1)) {
+                lastDiag = diagNow;
+                fprintf(stderr,
+                        "[SlPlayer][diag] stage=%d pos=%.2f vf=%d drop=%d "
+                        "vq=%u net=%lld win=%zu read=%lld base=%lld "
+                        "paused=%d afterSeek=%d awaiting=%d bp=%d\n",
+                        stage_.load(), position_.load(), videoFrames,
+                        droppedFrames_.load(),
+                        videoQueueMs_.load(), videoSource_.downloadedBytes(),
+                        videoSource_.bufferedBytes(), videoSource_.readPosition(),
+                        videoSource_.baseOffset(), paused_.load() ? 1 : 0,
+                        afterSeek ? 1 : 0, awaitingFirstFrame_.load() ? 1 : 0,
+                        backpressure_.load() ? 1 : 0);
+            }
+        }
         if (pauseFlush_.exchange(false)) {
             /* 丢弃 SLVideo 里已排队但还没上屏的画面，暂停点取当前呈现位置 */
             double at = position_.load();
@@ -1029,6 +1073,7 @@ void Player::Impl::run() {
             audio_.setPaused(true);
             fprintf(stderr, "[SlPlayer] 暂停: 清空视频队列 @ %.2f s\n", at);
             resumeInProgress_ = false;
+            backpressure_ = false;
             if (targetPaused_.load()) {
                 paused_ = true;
                 emit(EventType::Paused, std::string(), pauseRequestId_.load());
@@ -1085,6 +1130,9 @@ void Player::Impl::run() {
             }
             char text[128];
             av_strerror(ret, text, sizeof(text));
+            if (playDiag)
+                fprintf(stderr, "[SlPlayer][diag] read fail ret=%d %s stage=%d\n",
+                        ret, text, stage_.load());
             fail(std::string("读取失败: ") + text);
             return;
         }
@@ -1152,6 +1200,17 @@ void Player::Impl::run() {
                         std::this_thread::sleep_for(std::chrono::milliseconds(5));
                         waited += 5;
                     }
+                    uint32_t queuedAfterWait = SLVideo_GetQueuedVideoMS(videoStream);
+                    videoQueueMs_ = queuedAfterWait;
+                    if (!stop_ && queuedAfterWait > kVideoQueueMaxMs) {
+                        /* VPU 队列在 500ms 内没有消化，不能再喂新帧，否则队列
+                         * 会越积越长，最终 BeginFrame 报 out of space。 */
+                        if (!backpressure_.exchange(true))
+                            backpressureSinceMs_.store(steadyNowMs());
+                        droppedFrames_++;
+                        av_packet_unref(filtered);
+                        continue;
+                    }
                     stage_ = 32;
 
                     int beginResult = 0;
@@ -1179,6 +1238,7 @@ void Player::Impl::run() {
                                                    frameSize) == 0 &&
                             SLVideo_SubmitFrame(videoStream) == 0) {
                             submitted = true;
+                            backpressure_ = false;
                         } else {
                             fprintf(stderr, "[SlPlayer] 视频帧提交失败，丢弃\n");
                         }
@@ -1194,6 +1254,7 @@ void Player::Impl::run() {
                     videoFrames_ = videoFrames;
                     /* 心跳：每次成功 SubmitFrame 更新单调时间戳 */
                     lastFrameTimeMs_ = steadyNowMs();
+                    awaitingFirstFrame_.store(false);
 
                     double frameMs = videoClock * 1000.0;
                     if (filtered->pts != AV_NOPTS_VALUE)
@@ -1212,6 +1273,11 @@ void Player::Impl::run() {
 
                     if (!videoStarted) {
                         videoStarted = true;
+                        if (playDiag)
+                            fprintf(stderr,
+                                    "[SlPlayer][diag] first submit pts=%.1f "
+                                    "queued=%u vf=%d stage=%d\n",
+                                    frameMs, queuedNow, videoFrames, stage_.load());
                         emit(EventType::PlaybackStart);
                     }
 

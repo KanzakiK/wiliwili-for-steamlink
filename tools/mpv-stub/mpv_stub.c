@@ -1001,6 +1001,15 @@ static void *rx_thread(void *arg) {
             /* 播放结束：恢复不透明，避免 UI 透出没有视频的空视频平面（黑底） */
             transparency_disable();
         } else if (strcmp(evt, SL_EVT_ERROR) == 0 || strcmp(evt, SL_EVT_FATAL) == 0) {
+            /* FrameSubmitStalled 只是送帧停滞的上报，播放器仍在尝试恢复。
+             * 不能把它当播放结束，否则每次 fatal 都会关闭透明层并让 watchdog
+             * 停止工作，用户看到白屏而底层继续空转。 */
+            if (strcmp(evt, SL_EVT_FATAL) == 0 && nf >= 4 &&
+                strcmp(fields[3], "FrameSubmitStalled") == 0) {
+                fprintf(stderr,
+                        "[mpv-compat] 忽略 FrameSubmitStalled，保留透明层并让 watchdog 继续判定\n");
+                continue;
+            }
             /* 主源失败先试备用源；全失败才向 wiliwili 报 END_FILE(ERROR) */
             if (try_failover(ctx)) {
                 fire_wakeup(ctx);
