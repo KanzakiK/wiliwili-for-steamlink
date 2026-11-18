@@ -18,6 +18,42 @@ mkdir -p "$HOME"
 # libmpv 兼容层 fork/exec 的播放子进程路径
 export SL_DAEMON_PATH=/home/apps/wiliwili/bin/slplayer_daemon
 
+# 诊断开关：默认全部关闭；通过启动参数或同名环境变量按次开启。
+# 诊断代码保留在源码里，不因为一次定位完成就删除。
+#   --diag          轻量播放诊断（stage / 位置 / VPU 队列 / 下载窗口）
+#   --sync-debug    音视频对齐日志
+#   --http-debug    SlHttp 读取与窗口细节
+#   --stop-debug    退出/清理阶段日志
+#   --diag-all      以上全部
+# 也可在 /tmp/launch_cmdline.txt 用 `SL_PLAY_DIAG=1 /home/apps/wiliwili/wiliwili.sh`。
+_wili_pass=""
+for _wili_arg do
+    case "$_wili_arg" in
+        --diag) export SL_PLAY_DIAG=1 ;;
+        --sync-debug) export SL_SYNC_DEBUG=1 ;;
+        --http-debug) export SL_HTTP_DEBUG=1 ;;
+        --stop-debug) export SL_STOP_DEBUG=1 ;;
+        --diag-all)
+            export SL_PLAY_DIAG=1 SL_SYNC_DEBUG=1 SL_HTTP_DEBUG=1 SL_STOP_DEBUG=1
+            ;;
+        *)
+            if [ -z "$_wili_pass" ]; then
+                _wili_pass=$_wili_arg
+            else
+                _wili_pass="$_wili_pass
+$_wili_arg"
+            fi
+            ;;
+    esac
+done
+_wili_old_ifs=$IFS
+IFS='
+'
+set -f
+set -- $_wili_pass
+set +f
+IFS=$_wili_old_ifs
+
 # 注意：不要在这里设 SL_TRANSPARENT。
 # 那是阶段 3.3 验证"透明层能否透出视频"用的 spike 开关（borealis 补丁里
 # `if (getenv("SL_TRANSPARENT")) color.a = 0;`），一旦设置会让整个 UI 图层
