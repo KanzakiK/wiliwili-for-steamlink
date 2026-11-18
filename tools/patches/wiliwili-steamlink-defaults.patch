@@ -10,6 +10,7 @@ diff --git a/wiliwili/source/utils/config_helper.cpp b/wiliwili/source/utils/con
      {SettingItem::PLAYER_WINDOW_FULLSCREEN_ON_APP_FULLSCREEN, {"player_window_fullscreen_on_app_fullscreen", {}, {}, 0}},
 -    {SettingItem::PLAYER_AUTO_FULLSCREEN, {"player_auto_fullscreen", {}, {}, 0}},
 +    {SettingItem::PLAYER_AUTO_FULLSCREEN, {"player_auto_fullscreen", {}, {}, 1}}, // SteamLinkDefaults
++    // SteamLinkDefaults: player_auto_play 上游默认已开启，Steam Link 依赖详情页直接起播
      {SettingItem::PLAYER_OSD_TV_MODE, {"player_osd_tv_mode", {}, {}, 0}},
      {SettingItem::OPENCC_ON, {"opencc", {}, {}, 1}},
      {SettingItem::DANMAKU_ON, {"danmaku", {}, {}, 1}},
