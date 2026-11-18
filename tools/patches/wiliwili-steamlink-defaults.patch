@@ -69,3 +69,24 @@ diff --git a/wiliwili/source/utils/config_helper.cpp b/wiliwili/source/utils/con
  
      // 初始化视频比例
      MPVCore::VIDEO_ASPECT = getSettingItem(SettingItem::PLAYER_ASPECT, std::string{"-1"});
+@@ -794,7 +795,7 @@
+         // 初始化纹理缓存数量
+ #if defined(__PSV__) || defined(PS4)
+         brls::TextureCache::instance().cache.setCapacity(1);
+ #else
+-        brls::TextureCache::instance().cache.setCapacity(getSettingItem(SettingItem::TEXTURE_CACHE_NUM, 200));
++        brls::TextureCache::instance().cache.setCapacity(getSettingItem(SettingItem::TEXTURE_CACHE_NUM, 100)); // SteamLinkDefaults
+ #endif
+ 
+         // 初始化播放器音量
+diff --git a/wiliwili/source/activity/setting_activity.cpp b/wiliwili/source/activity/setting_activity.cpp
+--- a/wiliwili/source/activity/setting_activity.cpp
++++ b/wiliwili/source/activity/setting_activity.cpp
+@@ -616,7 +616,7 @@
+     selectorTexture->init("wiliwili/setting/app/image/texture"_i18n,
+                           {"100", "200 (" + "hints/preset"_i18n + ")", "300", "400", "500"},
+-                          conf.getSettingItem(SettingItem::TEXTURE_CACHE_NUM, 200) / 100 - 1, [](int data) {
++                          conf.getSettingItem(SettingItem::TEXTURE_CACHE_NUM, 100) / 100 - 1, [](int data) { // SteamLinkDefaults
+                               int num = 100 * data + 100;
+                               ProgramConfig::instance().setSettingItem(SettingItem::TEXTURE_CACHE_NUM, num);
+                               brls::TextureCache::instance().cache.setCapacity(num);
