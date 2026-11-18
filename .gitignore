@@ -1,17 +1,8 @@
 # 构建产物
-/demo/slvideo_test/slvideo_test
-/demo/ffmpeg_demux_test/ffmpeg_demux_test
-/demo/ffmpeg_player/ffmpeg_player
-/demo/ffmpeg_stream/ffmpeg_stream
 *.o
 *.a
 *.so
 *.log
-
-# 生成的测试码流（可用 ffmpeg 重新生成）
-demo/**/*.264
-demo/**/*.mp4
-demo/**/*.flv
 
 # 编辑器 / 系统 / 工具临时目录
 .vscode/

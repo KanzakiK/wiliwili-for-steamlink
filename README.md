@@ -70,7 +70,7 @@ DEVICE=root@<device-address> PASS=<device-password> sh tools/steamlink-app/insta
 - 不在用户播放测试时强杀进程部署；VPU 场景先恢复干净基线。
 - `/tmp` 是 tmpfs，禁止放二进制、资源或测试视频。
 
-完整纪律见 [AGENTS.md](AGENTS.md) 和 [docs/07-开发纪律.md](docs/07-开发纪律.md)。
+完整纪律见 [docs/07-开发纪律.md](docs/07-开发纪律.md)。
 
 ## 仓库结构
 
