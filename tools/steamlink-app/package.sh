@@ -17,7 +17,7 @@ done
 [ -d "$WILI_BUILD/resources" ] || { echo "缺少资源目录: $WILI_BUILD/resources" >&2; exit 1; }
 
 STAGE=$(mktemp -d)
-APP_DIR="$STAGE/$PKG_NAME/wiliwili"
+APP_DIR="$STAGE/wiliwili"
 mkdir -p "$APP_DIR/bin"
 
 cp "$HERE/toc.txt" "$HERE/wiliwili.sh" "$HERE/wiliwili.png" "$HERE/INSTALL.txt" "$APP_DIR/"
@@ -29,9 +29,9 @@ printf 'version=%s\ncommit=%s\nbuilt=%s\n' "$VERSION" "$COMMIT" "$(date -u '+%Y-
 chmod 755 "$APP_DIR/wiliwili.sh" "$APP_DIR/bin/wiliwili" "$APP_DIR/bin/slplayer_daemon"
 
 mkdir -p "$OUT_DIR"
-tar -czf "$OUT_DIR/$PKG_NAME.tar.gz" -C "$STAGE" "$PKG_NAME"
+tar -czf "$OUT_DIR/$PKG_NAME.tar.gz" -C "$STAGE" wiliwili
 if command -v zip >/dev/null 2>&1; then
-    (cd "$STAGE" && zip -qr "$OUT_DIR/$PKG_NAME.zip" "$PKG_NAME")
+    (cd "$STAGE" && zip -qr "$OUT_DIR/$PKG_NAME.zip" wiliwili)
 fi
 rm -rf "$STAGE"
 
