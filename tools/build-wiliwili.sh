@@ -150,12 +150,20 @@ if [ -f "$STEAM_DEFAULTS_PATCH" ] && [ -d "$SOURCE/.git" ]; then
     fi
 fi
 
-# 降低 NanoVG 字形图集上限，避免满弹幕时申请 51.84MB SHM 连续块。
+# 进度条预览雪碧图按显示尺寸降采样，避免 4800x2700 RGBA 占用 51.84MB SHM。
 ATLAS_CAP_PATCH="$PROJECT_DIR/tools/patches/borealis-nanovg-atlas-cap.patch"
 if [ -f "$ATLAS_CAP_PATCH" ] && [ -e "$SOURCE/library/borealis/.git" ]; then
     if ! grep -q 'SteamLinkAtlasCap' "$SOURCE/library/borealis/library/lib/extern/nanovg/nanovg.c" 2>/dev/null; then
         echo "apply borealis nanovg atlas cap patch"
         git -C "$SOURCE/library/borealis" apply --recount "$ATLAS_CAP_PATCH"
+    fi
+fi
+
+SNAPSHOT_DOWNSCALE_PATCH="$PROJECT_DIR/tools/patches/wiliwili-snapshot-downscale.patch"
+if [ -f "$SNAPSHOT_DOWNSCALE_PATCH" ] && [ -d "$SOURCE/.git" ]; then
+    if ! grep -q 'SteamLinkSnapshotDownscale' "$SOURCE/wiliwili/source/view/video_snapshot_core.cpp" 2>/dev/null; then
+        echo "apply wiliwili snapshot downscale patch"
+        git -C "$SOURCE" apply --recount "$SNAPSHOT_DOWNSCALE_PATCH"
     fi
 fi
 
