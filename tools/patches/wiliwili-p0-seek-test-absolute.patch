@@ -1,0 +1,25 @@
+diff --git a/wiliwili/source/main.cpp b/wiliwili/source/main.cpp
+--- a/wiliwili/source/main.cpp
++++ b/wiliwili/source/main.cpp
+@@ -109,16 +109,16 @@
+                 brls::Logger::info("[P0-REPRO] start");
+                 std::this_thread::sleep_for(std::chrono::seconds(5));
+-                brls::sync([]() { MPVCore::instance().seekRelative(115); });
++                brls::sync([]() { MPVCore::instance().seek(60); });
+                 std::this_thread::sleep_for(std::chrono::seconds(6));
+                 brls::sync([]() { MPVCore::instance().pause(); });
+                 std::this_thread::sleep_for(std::chrono::seconds(2));
+                 brls::sync([]() { MPVCore::instance().resume(); });
+                 std::this_thread::sleep_for(std::chrono::seconds(4));
+-                brls::sync([]() { MPVCore::instance().seekRelative(185); });
++                brls::sync([]() { MPVCore::instance().seek(220); });
+                 std::this_thread::sleep_for(std::chrono::seconds(6));
+-                brls::sync([]() { MPVCore::instance().seekRelative(185); });
++                brls::sync([]() { MPVCore::instance().seek(300); });
+                 std::this_thread::sleep_for(std::chrono::seconds(6));
+-                brls::sync([]() { MPVCore::instance().seekRelative(-185); });
++                brls::sync([]() { MPVCore::instance().seek(120); });
+                 std::this_thread::sleep_for(std::chrono::seconds(6));
+-                brls::sync([]() { MPVCore::instance().seekRelative(-95); });
++                brls::sync([]() { MPVCore::instance().seek(240); });
+                 brls::Logger::info("[P0-REPRO] done");

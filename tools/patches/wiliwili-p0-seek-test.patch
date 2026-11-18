@@ -1,0 +1,45 @@
+diff --git a/wiliwili/source/main.cpp b/wiliwili/source/main.cpp
+--- a/wiliwili/source/main.cpp
++++ b/wiliwili/source/main.cpp
+@@ -89,9 +89,41 @@
+                 std::this_thread::sleep_for(std::chrono::seconds(pauseAfter));
+                 brls::sync([]() { MPVCore::instance().pause(); });
+                 std::this_thread::sleep_for(std::chrono::seconds(5));
+                 brls::sync([]() { MPVCore::instance().resume(); });
+             }).detach();
+         }
++        const char* seekSeqArg = std::getenv("SL_TEST_SEEK_SEQUENCE");
++        if ((!openBV.empty() || !openAV.empty()) && seekSeqArg && std::strcmp(seekSeqArg, "1") == 0) {
++            std::thread([]() {
++                const auto waitDeadline = std::chrono::steady_clock::now() +
++                                          std::chrono::seconds(30);
++                bool playing = false;
++                while (std::chrono::steady_clock::now() < waitDeadline) {
++                    brls::sync([&playing]() {
++                        playing = MPVCore::instance().isPlaying();
++                    });
++                    if (playing) break;
++                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
++                }
++                if (!playing) return;
++                brls::Logger::info("[P0-REPRO] start");
++                std::this_thread::sleep_for(std::chrono::seconds(5));
++                brls::sync([]() { MPVCore::instance().seekRelative(115); });
++                std::this_thread::sleep_for(std::chrono::seconds(6));
++                brls::sync([]() { MPVCore::instance().pause(); });
++                std::this_thread::sleep_for(std::chrono::seconds(2));
++                brls::sync([]() { MPVCore::instance().resume(); });
++                std::this_thread::sleep_for(std::chrono::seconds(4));
++                brls::sync([]() { MPVCore::instance().seekRelative(185); });
++                std::this_thread::sleep_for(std::chrono::seconds(6));
++                brls::sync([]() { MPVCore::instance().seekRelative(185); });
++                std::this_thread::sleep_for(std::chrono::seconds(6));
++                brls::sync([]() { MPVCore::instance().seekRelative(-185); });
++                std::this_thread::sleep_for(std::chrono::seconds(6));
++                brls::sync([]() { MPVCore::instance().seekRelative(-95); });
++                brls::Logger::info("[P0-REPRO] done");
++            }).detach();
++        }
+         // Uncomment these lines to debug activities
+         //        Intent::openBV("BV1Da411Y7U4");  // 弹幕防遮挡 (横屏)
+         //        Intent::openBV("BV1iN4y1m7J3");  // 弹幕防遮挡 (竖屏)

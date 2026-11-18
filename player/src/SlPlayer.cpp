@@ -1,0 +1,1386 @@
+#include "SlPlayer.h"
+
+#include "AudioPipeline.h"
+#include "H264Sps.h"
+#include "HttpSource.h"
+
+#include <algorithm>
+#include <atomic>
+#include <cerrno>
+#include <cstdarg>
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <exception>
+#include <mutex>
+#include <thread>
+#include <utility>
+
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavcodec/bsf.h>
+#include <libavformat/avformat.h>
+#include <libavutil/error.h>
+}
+
+#include <SLAudio.h>
+#include <SLVideo.h>
+
+namespace sl {
+namespace {
+
+constexpr unsigned kVideoQueueMaxMs = 4000;
+/* ---- VPU 鲁棒性参数（第 1 步：事前防御 + Dirty Flag）---- */
+/* 脏退出标记：起调前写、正常退出（FreeContext 之后）删；残留 = 上次异常退出 */
+constexpr const char* kVpuDirtyFlagPath = "/tmp/slplayer_vpu.lock";
+/* 脏标记清洗：建一次 Context 再释放，冲刷残留会话 */
+constexpr int kVpuCleanupDelayMs = 200;
+/* 起调失败复位：FreeContext → 延时 → CreateContext，有限次重试 */
+constexpr int kVpuInitRetryCount = 2;
+constexpr int kVpuInitRetryDelayMs = 200;
+/* 重建 stream 前给硬件的清理间隔（待真机校准：50 / 100 / 200ms） */
+constexpr int kStreamRebuildGapMs = 50;
+/* 连续 seek 时的最小重建间隔：50ms 实测会在高 refs 片源上迅速耗尽 SHM 连续块。
+ * 只限制“两次重建之间”，单次 seek 不受影响；数值待真机继续校准。 */
+constexpr int kSeekRebuildMinGapMs = 400;
+
+constexpr const char* kDefaultUserAgent =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
+/* 正常退出卡住时用于定位阶段；默认关闭，SL_STOP_DEBUG=1 才输出。 */
+bool stopDebugEnabled() {
+    static const bool enabled = std::getenv("SL_STOP_DEBUG") != nullptr;
+    return enabled;
+}
+
+void stopLog(const char* stage) {
+    if (stopDebugEnabled())
+        fprintf(stderr, "[SlPlayer][stop] %s\n", stage);
+}
+
+bool syncDebugEnabled() {
+    static const bool enabled = std::getenv("SL_SYNC_DEBUG") != nullptr;
+    return enabled;
+}
+
+void syncLog(const char* fmt, ...) {
+    if (!syncDebugEnabled())
+        return;
+    va_list args;
+    va_start(args, fmt);
+    fprintf(stderr, "[SlPlayer][sync] ");
+    vfprintf(stderr, fmt, args);
+    fprintf(stderr, "\n");
+    va_end(args);
+}
+
+double meanFps(AVRational rate) {
+    double fps = av_q2d(rate);
+    if (fps < 1.0 || fps > 120.0)
+        return 25.0;
+    return fps;
+}
+
+/* 从 B 站 DASH URL 里提取 oid/qn，避免把整条签名 URL 写进日志。
+ * 典型片段：/upgcxcode/34/04/43684400434/43684400434-1-30064.m4s?... */
+std::string sourceTag(const std::string& url) {
+    size_t query = url.find('?');
+    size_t pathEnd = (query == std::string::npos) ? url.size() : query;
+    if (pathEnd == 0)
+        return "unknown";
+    size_t slash = url.rfind('/', pathEnd - 1);
+    if (slash == std::string::npos)
+        return "local";
+    size_t prev = (slash == 0) ? 0 : url.rfind('/', slash - 1);
+    if (prev == std::string::npos)
+        return "local";
+    std::string oid = url.substr(prev + 1, slash - prev - 1);
+    std::string file = url.substr(slash + 1, pathEnd - slash - 1);
+    size_t dash = file.rfind('-');
+    size_t dot = file.rfind('.');
+    if (dash == std::string::npos || dot == std::string::npos || dot <= dash + 1)
+        return "oid=" + oid;
+    return "oid=" + oid + " qn=" + file.substr(dash + 1, dot - dash - 1);
+}
+
+/* steady_clock 单调毫秒（watchdog 心跳用，不受系统时间调整影响） */
+std::int64_t steadyNowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+/* VPU 生命周期日志：只在 open/stop/CreateStream/FreeStream 边界输出，
+ * 用来对照切清晰度与退出时的驱动调用顺序，不进入逐帧路径。 */
+void vpuLog(const char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    fprintf(stderr, "[SlPlayer][vpu] %lld ", (long long)steadyNowMs());
+    vfprintf(stderr, fmt, args);
+    fputc('\n', stderr);
+    va_end(args);
+}
+
+/* ---- Dirty Flag 辅助（文件 I/O 只做标记，不碰 VPU）---- */
+bool dirtyFlagPresent() {
+    return std::fopen(kVpuDirtyFlagPath, "r") != nullptr;
+}
+
+void writeDirtyFlag() {
+    FILE* f = std::fopen(kVpuDirtyFlagPath, "w");
+    if (f) {
+        std::fprintf(f, "SlPlayer VPU session in progress\n");
+        std::fclose(f);
+    } else {
+        fprintf(stderr, "[SlPlayer] 警告：无法写 VPU 脏标记 %s\n",
+                kVpuDirtyFlagPath);
+    }
+}
+
+void clearDirtyFlag() {
+    if (std::remove(kVpuDirtyFlagPath) != 0 && errno != ENOENT) {
+        fprintf(stderr, "[SlPlayer] 警告：无法清除 VPU 脏标记 %s\n",
+                kVpuDirtyFlagPath);
+    }
+}
+
+} // namespace
+
+const char* eventTypeName(EventType type) {
+    switch (type) {
+    case EventType::Opened: return "Opened";
+    case EventType::PlaybackStart: return "PlaybackStart";
+    case EventType::Progress: return "Progress";
+    case EventType::Paused: return "Paused";
+    case EventType::Resumed: return "Resumed";
+    case EventType::Seeked: return "Seeked";
+    case EventType::EndFile: return "EndFile";
+    case EventType::Error: return "Error";
+    case EventType::Unsupported: return "Unsupported";
+    }
+    return "Unknown";
+}
+
+const char* fatalTypeName(FatalType type) {
+    switch (type) {
+    case FatalType::VpuInitFailed: return "VpuInitFailed";
+    case FatalType::VpuRebuildFailed: return "VpuRebuildFailed";
+    case FatalType::FrameSubmitStalled: return "FrameSubmitStalled";
+    case FatalType::UnsupportedStream: return "UnsupportedStream";
+    }
+    return "Unknown";
+}
+
+struct Player::Impl {
+    Impl() = default;
+    ~Impl() { stop(); }
+
+    void setEventCallback(EventCallback cb) {
+        std::lock_guard<std::mutex> lock(mutex);
+        callback = std::move(cb);
+    }
+
+    void setFatalCallback(FatalCallback cb) {
+        std::lock_guard<std::mutex> lock(mutex);
+        fatalCallback = std::move(cb);
+    }
+
+    bool start(const SourceSpec& spec) {
+        if (thread.joinable() &&
+            std::this_thread::get_id() == thread.get_id()) {
+            fprintf(stderr, "[SlPlayer] 不能在事件回调里重新 open\n");
+            return false;
+        }
+
+        vpuLog("open: stop previous player");
+        stop();
+        vpuLog("open: previous player stopped");
+        if (spec.videoUrl.empty())
+            return false;
+
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            spec_ = spec;
+        }
+
+        stop_ = false;
+        paused_ = false;
+        targetPaused_ = false;
+        pendingSeek_ = -1.0;
+        pendingSeekId_ = 0;
+        latestSeekRequestId_ = 0;
+        pauseRequestId_ = 0;
+        resumeRequestId_ = 0;
+        seeking_ = false;
+        pauseFlush_ = false;
+        pauseFlushed_ = false;
+        resumeSeek_ = false;
+        resumeInProgress_ = false;
+        lastStreamRebuildMs_ = 0;
+        position_ = spec.startSeconds > 0.0 ? spec.startSeconds : 0.0;
+        duration_ = spec.endSeconds > 0.0 ? spec.endSeconds : 0.0;
+        videoFrames_ = 0;
+        droppedFrames_ = 0;
+        beginRetries_ = 0;
+        videoQueueMs_ = 0;
+        audio_.setVolume(volume_.load());
+        {
+            std::lock_guard<std::mutex> lock(infoMutex);
+            info_ = VideoInfo();
+        }
+
+        running_ = true;
+        /* 线程入口兜底：run() 内若抛出非回调异常（如 bad_alloc），
+         * 栈展开时 guard 已清理 VPU，这里捕获避免 std::terminate 拖垮进程。 */
+        thread = std::thread([this] {
+            try {
+                run();
+            } catch (const std::exception& e) {
+                fprintf(stderr, "[SlPlayer] 播放线程异常: %s\n", e.what());
+                running_ = false;
+            } catch (...) {
+                fprintf(stderr, "[SlPlayer] 播放线程未知异常\n");
+                running_ = false;
+            }
+        });
+        return true;
+    }
+
+    void stop() {
+        if (!thread.joinable()) {
+            running_ = false;
+            return;
+        }
+        if (std::this_thread::get_id() == thread.get_id()) {
+            stopLog("self-stop: set stop_, interrupt sources");
+            stop_ = true;
+            audio_.interrupt();
+            videoSource_.interrupt();
+            audioSource_.interrupt();
+            return;
+        }
+
+        stopLog("set stop_, interrupt audio/video sources");
+        stop_ = true;
+        /* 先唤醒音频线程：它可能在 self-demux 或包队列 cond 上等待。 */
+        audio_.interrupt();
+        videoSource_.interrupt();
+        audioSource_.interrupt();
+        vpuLog("stop: join player thread");
+        stopLog("join player thread");
+        thread.join();
+        vpuLog("stop: player thread joined");
+        stopLog("player thread joined");
+        running_ = false;
+    }
+
+    void setPaused(bool value, std::uint64_t requestId) {
+        bool previous = targetPaused_.exchange(value);
+        if (value)
+            pauseRequestId_.store(requestId);
+        else
+            resumeRequestId_.store(requestId);
+        if (previous == value)
+            return;
+
+        if (value) {
+            /* SLVideo 队列里还有 ~2.4s 画面，必须由播放线程清空才能立即暂停 */
+            pauseFlush_ = true;
+        } else {
+            /* 音频要等视频首帧重建并对齐后再恢复，避免声音先跑出去。 */
+            if (paused_.load()) {
+                resumeTarget_.store(position_.load());
+                resumeSeek_ = true;
+                resumeInProgress_ = true;
+            }
+        }
+        /* 事件必须由播放线程在实际 flush/首帧完成后发出，命令入口只改目标态。 */
+    }
+
+    void requestSeek(double seconds, std::uint64_t requestId) {
+        if (seconds < 0.0)
+            seconds = 0.0;
+        latestSeekRequestId_.store(requestId);
+        pendingSeekId_.store(requestId);
+        pendingSeek_ = seconds;
+    }
+
+    void setVolume(int percent) {
+        int value = std::min(100, std::max(0, percent));
+        volume_ = value;
+        audio_.setVolume(value);
+    }
+
+    Stats stats() const {
+        Stats result;
+        result.position = position_.load();
+        result.duration = duration_.load();
+        result.videoFrames = videoFrames_.load();
+        result.droppedFrames = droppedFrames_.load();
+        result.beginRetries = beginRetries_.load();
+        result.videoQueueMs = videoQueueMs_.load();
+        result.audioRate = audio_.rate();
+        result.audioStarted = audio_.started();
+        result.audioQueuedSamples = audio_.queuedSamples();
+        result.audioDelayMs = audio_.delayMs();
+        result.audioSubmittedMs = audio_.submittedMs();
+        result.audioPackets = audio_.queuedPackets();
+        result.downloadedBytes = videoSource_.downloadedBytes();
+        result.bufferedBytes = videoSource_.bufferedBytes();
+        result.readPosition = videoSource_.readPosition();
+        result.bufferBaseOffset = videoSource_.baseOffset();
+        result.stage = stage_.load();
+        return result;
+    }
+
+    /*
+     * 无锁心跳：只读 atomic，不取任何锁、不碰数据源查询。
+     * watchdog 线程高频读它也不会被播放线程拖住（复核见 06 第三节）。
+     */
+    Heartbeat heartbeat() const {
+        Heartbeat hb;
+        hb.lastFrameTimeMs = lastFrameTimeMs_.load();
+        hb.stage = stage_.load();
+        hb.videoFrames = videoFrames_.load();
+        hb.workerAlive = running_.load();
+        hb.currentPaused = paused_.load();
+        hb.targetPaused = targetPaused_.load();
+        hb.seeking = seeking_.load() || pendingSeek_.load() >= 0.0;
+        if (resumeInProgress_.load())
+            hb.currentPaused = false;
+        hb.playing = hb.workerAlive && !hb.currentPaused && !hb.seeking;
+        /*
+         * pause/seek 重建期间队列本来就不增长，watchdog 必须挂起判定。
+         * 真机验证发现：仅用 pauseFlush_/pauseFlushed_ 会在暂停静默期失效
+         * （清队列完成后 pauseFlushed_ 仍为 true，但恢复 seek 完成会置回 false），
+         * 导致长时间暂停时 frameAge 持续增长、transition=0 → watchdog 误判卡死。
+         * 因此只要 paused_ 为真就挂起；seek/resume 重建另用标志覆盖。
+         */
+        hb.inTransition = hb.currentPaused || hb.targetPaused ||
+                          pauseFlush_.load() ||
+                          pauseFlushed_.load() || resumeSeek_.load() ||
+                          resumeInProgress_.load() ||
+                          hb.seeking;
+        return hb;
+    }
+
+    void emit(EventType type, std::string message = std::string(),
+              std::uint64_t requestId = 0) {
+        EventCallback cb;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            cb = callback;
+        }
+        if (!cb)
+            return;
+
+        Event event;
+        event.type = type;
+        event.position = position_.load();
+        event.duration = duration_.load();
+        event.requestId = requestId;
+        event.message = std::move(message);
+        /* 用户回调抛异常不能穿过播放线程导致 terminate / 跳过 VPU 清理 */
+        try {
+            cb(event);
+        } catch (const std::exception& e) {
+            fprintf(stderr, "[SlPlayer] 事件回调抛异常: %s\n", e.what());
+        } catch (...) {
+            fprintf(stderr, "[SlPlayer] 事件回调抛未知异常\n");
+        }
+    }
+
+    /* VPU 致命错误上报：与 emit 同样保护，回调异常不穿透播放线程 */
+    void emitFatal(FatalType type, const std::string& message) {
+        FatalCallback cb;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            cb = fatalCallback;
+        }
+        fprintf(stderr, "[SlPlayer] VPU 致命错误: %s - %s\n",
+                fatalTypeName(type), message.c_str());
+        if (!cb)
+            return;
+        try {
+            cb(type, message);
+        } catch (const std::exception& e) {
+            fprintf(stderr, "[SlPlayer] fatal 回调抛异常: %s\n", e.what());
+        } catch (...) {
+            fprintf(stderr, "[SlPlayer] fatal 回调抛未知异常\n");
+        }
+    }
+
+    std::string userAgent() const {
+        if (!spec_.userAgent.empty())
+            return spec_.userAgent;
+        return kDefaultUserAgent;
+    }
+
+    void run();
+
+    mutable std::mutex mutex;
+    EventCallback callback;
+    FatalCallback fatalCallback;
+    SourceSpec spec_;
+
+    HttpSource videoSource_;
+    HttpSource audioSource_;
+    AudioPipeline audio_;
+
+    std::thread thread;
+    std::atomic<bool> stop_{false};
+    std::atomic<bool> paused_{false};
+    std::atomic<bool> targetPaused_{false};
+    std::atomic<bool> running_{false};
+    std::atomic<bool> pauseFlush_{false};
+    std::atomic<bool> pauseFlushed_{false};
+    std::atomic<bool> resumeSeek_{false};
+    std::atomic<bool> resumeInProgress_{false};
+    std::atomic<std::int64_t> lastStreamRebuildMs_{0};
+    std::atomic<bool> seeking_{false};
+    std::atomic<double> resumeTarget_{0.0};
+    std::atomic<double> pendingSeek_{-1.0};
+    std::atomic<std::uint64_t> pendingSeekId_{0};
+    std::atomic<std::uint64_t> latestSeekRequestId_{0};
+    std::atomic<std::uint64_t> pauseRequestId_{0};
+    std::atomic<std::uint64_t> resumeRequestId_{0};
+    std::atomic<int> volume_{100};
+    std::atomic<double> position_{0.0};
+    std::atomic<double> duration_{0.0};
+    std::atomic<int> videoFrames_{0};
+    std::atomic<int> droppedFrames_{0};
+    std::atomic<int> beginRetries_{0};
+    std::atomic<unsigned> videoQueueMs_{0};
+    std::atomic<int> stage_{0};
+    /* 第 2 步：最后成功 SubmitFrame 的 steady_clock 毫秒时间戳（watchdog 心跳） */
+    std::atomic<std::int64_t> lastFrameTimeMs_{0};
+
+    mutable std::mutex infoMutex;
+    VideoInfo info_;
+};
+
+void Player::Impl::run() {
+    SourceSpec spec;
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        spec = spec_;
+    }
+
+    CSLVideoContext* videoContext = nullptr;
+    CSLVideoStream* videoStream = nullptr;
+    CSLAudioContext* audioContext = nullptr;
+    AVBSFContext* bsf = nullptr;
+    AVPacket* packet = nullptr;
+    AVPacket* filtered = nullptr;
+    AVPacket* pendingPacket = nullptr;
+    bool havePendingPacket = false;
+
+    AVFormatContext* format = nullptr;
+    AVStream* stream = nullptr;
+    int videoIndex = -1;
+    AVRational frameRate{25, 1};
+    double fps = 25.0;
+    double duration = 0.0;
+    double videoClock = spec.startSeconds;
+    double maxSubmittedMs = 0.0;
+    /* 音频流开始解码对应的原始媒体时间点：
+     * 初始播放为 0；seek/暂停恢复后是实际关键帧 PTS。
+     * 计算音频预缓冲 skip 时必须减去该基准，否则会把目标位置之前的内容重复跳过。 */
+    double audioBaseMs = 0.0;
+    /* 严格 seek 对齐：音频目标用请求时间点，视频实际从关键帧开始解码；
+     * 首帧提交后按“已测得的上屏延迟 + 关键帧到目标的时间差”确定音频启动时刻。 */
+    double seekDisplayTargetMs = 0.0;
+    double firstFramePtsAfterSeekMs = -1.0;
+    int measuredVideoLatencyMs = 0;
+    bool firstFrameAfterSeekRecorded = false;
+
+    bool audioReady = false;
+    bool selfDemux = false;
+    bool rewriteSps = false;
+    std::vector<uint8_t> patchedExtradata;
+    std::vector<uint8_t> rewriteBuffer;
+    int spsFrameLogs = 0;
+    const char* dumpFramePath = std::getenv("SL_DUMP_FRAME");
+    bool frameDumped = false;
+
+    /* SPS 改写默认关闭：用户多轮真机测试确认 refs 7->4 会让不少视频花屏。
+     * SL_SPS_REWRITE=1 仅作对照实验；SL_SPS_TARGET 可指定目标。
+     * VPU/SHM 压力改由减少重建次数和重建间隔处理。 */
+    const char* rewriteEnv = std::getenv("SL_SPS_REWRITE");
+    bool enableRewrite = rewriteEnv && std::strcmp(rewriteEnv, "0") != 0;
+    bool explicitRewrite = rewriteEnv && std::strcmp(rewriteEnv, "1") == 0;
+    int spsTargetRefs = 4;
+    /* -1 = 保留片源值：默认只降 refs，不缩短重排/解码缓冲。 */
+    int spsTargetReorder = -1;
+    int spsTargetBuffering = -1;
+    if (const char* target = std::getenv("SL_SPS_TARGET")) {
+        int refs = 0;
+        int reorder = 0;
+        int buffering = 0;
+        if (sscanf(target, "%d,%d,%d", &refs, &reorder, &buffering) == 3 &&
+            refs > 0 && reorder >= 0 && buffering > 0) {
+            spsTargetRefs = refs;
+            spsTargetReorder = reorder;
+            spsTargetBuffering = buffering;
+        }
+    }
+    fprintf(stderr,
+            "[SlPlayer] SPS 策略: refs<=%d reorder=%s buffering=%s rewrite=%s\n",
+            spsTargetRefs, spsTargetReorder < 0 ? "keep" : "clamp",
+            spsTargetBuffering < 0 ? "keep" : "clamp",
+            enableRewrite ? "on" : "off");
+    bool videoStarted = false;
+    bool afterSeek = false;
+    bool audioScheduled = false;
+    std::uint64_t pendingResumeRequestId = 0;
+    bool pendingResumeEvent = false;
+    uint32_t queueMax = 0;
+    int queueFlatFrames = 0;
+    int videoFrames = 0;
+    auto nextDeadline = std::chrono::steady_clock::now();
+    auto lastProgress = nextDeadline;
+
+    /* shutdown 幂等：显式调用与 RAII 兜底可能都触发，保证只释放一次 */
+    bool shutdownDone = false;
+    auto shutdown = [&] {
+        if (shutdownDone)
+            return;
+        shutdownDone = true;
+        stopLog("shutdown: audio_.stop");
+        audio_.stop();
+        stopLog("shutdown: SLAudio_FreeContext");
+        if (audioContext) {
+            SLAudio_FreeContext(audioContext);
+            audioContext = nullptr;
+        }
+        stopLog("shutdown: SLVideo_FreeStream");
+        if (videoStream) {
+            vpuLog("shutdown: FreeStream enter");
+            SLVideo_FreeStream(videoStream);
+            videoStream = nullptr;
+            vpuLog("shutdown: FreeStream done");
+        }
+        if (bsf)
+            av_bsf_free(&bsf);
+        if (packet)
+            av_packet_free(&packet);
+        if (filtered)
+            av_packet_free(&filtered);
+        if (pendingPacket)
+            av_packet_free(&pendingPacket);
+        audioSource_.close();
+        videoSource_.close();
+        stopLog("shutdown: SLVideo_FreeContext");
+        if (videoContext) {
+            vpuLog("shutdown: FreeContext enter");
+            SLVideo_FreeContext(videoContext);
+            videoContext = nullptr;
+            vpuLog("shutdown: FreeContext done");
+        }
+        /* 必须在 FreeContext 之后清标记：只有完整走完退出流程才认为 VPU 干净 */
+        stopLog("shutdown: clear dirty flag");
+        clearDirtyFlag();
+        stopLog("shutdown: done");
+        running_ = false;
+    };
+
+    /* RAII 兜底：emit() 触发的用户回调若抛异常，栈展开时仍会 shutdown，
+     * 不会把 VPU stream/context 泄漏在脏状态里（复核见 06 文档第三节）。 */
+    struct ShutdownGuard {
+        decltype(shutdown)* fn;
+        ~ShutdownGuard() { (*fn)(); }
+    } guard{&shutdown};
+
+    auto fail = [&](const std::string& message) {
+        emit(EventType::Error, message);
+        shutdown();
+    };
+
+    /*
+     * VPU 起调前置清洗（Dirty Flag）：
+     * 若标记残留说明上次异常退出（含被 SIGKILL），VPU 可能处于脏状态。
+     * SDK 无全局 Deinit，最接近复位的动作是建一次 Context 再释放并延时，
+     * 冲刷用户态残留会话。清洗本身不喂任何帧，不会成为新污染源。
+     */
+    bool wasDirty = dirtyFlagPresent();
+    if (wasDirty) {
+        fprintf(stderr,
+                "[SlPlayer] 检测到 VPU 脏标记，先执行启动前清洗\n");
+        CSLVideoContext* probe = SLVideo_CreateContext();
+        if (probe) {
+            SLVideo_FreeContext(probe);
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(kVpuCleanupDelayMs));
+            fprintf(stderr, "[SlPlayer] 启动前清洗完成\n");
+        } else {
+            fprintf(stderr,
+                    "[SlPlayer] 清洗时 CreateContext 失败，仍继续正式起调\n");
+        }
+    }
+    writeDirtyFlag();
+
+    SLVideo_SetLogLevel(k_ESLVideoLogError);
+    /* 起调失败复位重试：CreateContext 失败无旧 context 可 free，只延时重试 */
+    for (int attempt = 0; attempt <= kVpuInitRetryCount; ++attempt) {
+        videoContext = SLVideo_CreateContext();
+        if (videoContext)
+            break;
+        if (attempt < kVpuInitRetryCount) {
+            fprintf(stderr,
+                    "[SlPlayer] CreateContext 失败，%dms 后复位重试 (%d/%d)\n",
+                    kVpuInitRetryDelayMs, attempt + 1, kVpuInitRetryCount);
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(kVpuInitRetryDelayMs));
+        }
+    }
+    if (!videoContext) {
+        emitFatal(FatalType::VpuInitFailed, "SLVideo_CreateContext 失败（含复位重试）");
+        fail("SLVideo_CreateContext 失败（含复位重试）");
+        return;
+    }
+
+    if (!videoSource_.open(spec.videoUrl, spec.referrer, userAgent())) {
+        fail("视频源打开失败: " + videoSource_.error());
+        return;
+    }
+
+    format = videoSource_.format();
+    videoIndex = videoSource_.videoIndex();
+    if (!format || videoIndex < 0) {
+        fail("没有找到视频流");
+        return;
+    }
+
+    stream = format->streams[videoIndex];
+    if (stream->codecpar->codec_id != AV_CODEC_ID_H264) {
+        fail("仅支持 H.264 视频流");
+        return;
+    }
+
+    frameRate = stream->avg_frame_rate;
+    if (frameRate.num <= 0 || frameRate.den <= 0)
+        frameRate = stream->r_frame_rate;
+    if (frameRate.num <= 0 || frameRate.den <= 0)
+        frameRate = AVRational{25, 1};
+    fps = meanFps(frameRate);
+
+    duration = format->duration > 0 ? format->duration / (double)AV_TIME_BASE : 0.0;
+    if (duration <= 0.0 && stream->duration > 0)
+        duration = stream->duration * av_q2d(stream->time_base);
+    if (spec.endSeconds > 0.0 && (duration <= 0.0 || duration > spec.endSeconds))
+        duration = spec.endSeconds;
+    duration_ = duration;
+    {
+        std::lock_guard<std::mutex> lock(infoMutex);
+        info_.width = stream->codecpar->width;
+        info_.height = stream->codecpar->height;
+        info_.fps = fps;
+        info_.duration = duration;
+    }
+    fprintf(stderr,
+            "[SlPlayer][media] %s audio=%zu duration=%.3f %dx%d fps=%.3f\n",
+            sourceTag(spec.videoUrl).c_str(), spec.audioUrls.size(), duration,
+            info_.width, info_.height, fps);
+
+    /* 前置 SPS 门禁：只降 refs，默认保留 reorder/buffering。
+     * 实测 7->4 refs 可避免高参考帧片源在 seek 后 VDEC SHM 分配失败；
+     * 同时压低 reorder/buffering 会截断 B 帧重排，出现花屏/抽动。 */
+    int effectiveSpsReorder = spsTargetReorder;
+    int effectiveSpsBuffering = spsTargetBuffering;
+    bool needSpsRewrite = false;
+    if (stream->codecpar->extradata && stream->codecpar->extradata_size > 0) {
+        H264SpsInfo sps = parseAvcC(stream->codecpar->extradata,
+                                    (size_t)stream->codecpar->extradata_size);
+        if (!sps.valid) {
+            fprintf(stderr, "[SlPlayer] SPS 解析失败（继续尝试播放）\n");
+        } else {
+            effectiveSpsReorder = spsTargetReorder < 0
+                                      ? sps.reorder
+                                      : std::min(sps.reorder, spsTargetReorder);
+            effectiveSpsBuffering =
+                spsTargetBuffering < 0
+                    ? sps.buffering
+                    : std::min(sps.buffering, spsTargetBuffering);
+            needSpsRewrite = sps.refs > spsTargetRefs ||
+                             effectiveSpsReorder < sps.reorder ||
+                             effectiveSpsBuffering < sps.buffering;
+            fprintf(stderr,
+                    "[SlPlayer] SPS: refs=%d reorder=%d buffering=%d target=%d/%d/%d need=%d rewrite=%d\n",
+                    sps.refs, sps.reorder, sps.buffering,
+                    spsTargetRefs, effectiveSpsReorder, effectiveSpsBuffering,
+                    needSpsRewrite ? 1 : 0,
+                    enableRewrite ? 1 : 0);
+            if (!enableRewrite && needSpsRewrite) {
+                fprintf(stderr, "[SlPlayer] 高参考帧码流，SPS 改写已由 SL_SPS_REWRITE=0 关闭\n");
+            }
+        }
+
+        if (sps.valid && enableRewrite && needSpsRewrite) {
+            patchedExtradata.assign(stream->codecpar->extradata,
+                                    stream->codecpar->extradata +
+                                        stream->codecpar->extradata_size);
+            bool changed = false;
+            if (!patchAvcC(patchedExtradata, spsTargetRefs,
+                           effectiveSpsReorder, effectiveSpsBuffering,
+                           &changed) ||
+                !changed) {
+                patchedExtradata.clear();
+                if (explicitRewrite) {
+                    emitFatal(FatalType::UnsupportedStream,
+                              "当前清晰度编码档次不受 Steam Link 硬件支持");
+                    emit(EventType::Unsupported,
+                         "当前清晰度编码档次不受 Steam Link 硬件支持");
+                    shutdown();
+                    return;
+                }
+                fprintf(stderr, "[SlPlayer] 默认 SPS 改写失败，继续原始码流\n");
+            } else {
+                rewriteSps = true;
+                H264SpsInfo patched = parseAvcC(patchedExtradata.data(),
+                                                patchedExtradata.size());
+                fprintf(stderr,
+                        "[SlPlayer] SPS 已改写: refs %d->%d, reorder %d->%d, "
+                        "buffering %d->%d\n",
+                        sps.refs, patched.refs, sps.reorder, patched.reorder,
+                        sps.buffering, patched.buffering);
+            }
+        }
+    } else {
+        fprintf(stderr, "[SlPlayer] 无 extradata，跳过 SPS 门禁\n");
+    }
+
+    emit(EventType::Opened);
+
+    const AVBitStreamFilter* filter = av_bsf_get_by_name("h264_mp4toannexb");
+    if (!filter || av_bsf_alloc(filter, &bsf) < 0) {
+        fail("h264_mp4toannexb 初始化失败");
+        return;
+    }
+    if (avcodec_parameters_copy(bsf->par_in, stream->codecpar) < 0) {
+        fail("复制编码参数失败");
+        return;
+    }
+    if (!patchedExtradata.empty()) {
+        av_freep(&bsf->par_in->extradata);
+        bsf->par_in->extradata = (uint8_t*)av_malloc(
+            patchedExtradata.size() + AV_INPUT_BUFFER_PADDING_SIZE);
+        if (!bsf->par_in->extradata) {
+            fail("SPS 缓冲分配失败");
+            return;
+        }
+        memcpy(bsf->par_in->extradata, patchedExtradata.data(),
+               patchedExtradata.size());
+        memset(bsf->par_in->extradata + patchedExtradata.size(), 0,
+               AV_INPUT_BUFFER_PADDING_SIZE);
+        bsf->par_in->extradata_size = (int)patchedExtradata.size();
+    }
+    bsf->time_base_in = stream->time_base;
+    if (av_bsf_init(bsf) < 0) {
+        fail("av_bsf_init 失败");
+        return;
+    }
+
+    /*
+     * CreateStream 失败复位重试：有旧 context，按 FreeContext → 延时 →
+     * CreateContext → CreateStream 的序列重试。重建 context 后 applyStreamParams
+     * 仍能正常工作（它只依赖 videoStream 和帧率参数）。
+     */
+    for (int attempt = 0; attempt <= kVpuInitRetryCount; ++attempt) {
+        vpuLog("CreateStream initial enter attempt=%d", attempt);
+        videoStream = SLVideo_CreateStream(videoContext, k_ESLVideoFormatH264, 0);
+        vpuLog("CreateStream initial result=%p", (void*)videoStream);
+        if (videoStream)
+            break;
+        if (attempt < kVpuInitRetryCount) {
+            fprintf(stderr,
+                    "[SlPlayer] CreateStream 失败，复位重试 (%d/%d)\n",
+                    attempt + 1, kVpuInitRetryCount);
+            if (videoContext) {
+                SLVideo_FreeContext(videoContext);
+                videoContext = nullptr;
+            }
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(kVpuInitRetryDelayMs));
+            videoContext = SLVideo_CreateContext();
+            if (!videoContext) {
+                fprintf(stderr, "[SlPlayer] 复位时 CreateContext 也失败\n");
+                break;
+            }
+        }
+    }
+    if (!videoStream) {
+        emitFatal(FatalType::VpuInitFailed, "SLVideo_CreateStream 失败（含复位重试）");
+        fail("SLVideo_CreateStream 失败（含复位重试）");
+        return;
+    }
+    auto applyStreamParams = [&] {
+        if (!videoStream)
+            return;
+        SLVideo_SetStreamTargetFramerate(videoStream, (unsigned)frameRate.num,
+                                         (unsigned)frameRate.den);
+        SLVideo_SetStreamTargetBitrate(videoStream, 1000);
+    };
+    applyStreamParams();
+    fprintf(stderr, "[SlPlayer] SLVideo stream 就绪\n");
+
+    /*
+     * 重建 stream 前的清理间隔：seek/pause 都是 FreeStream → CreateStream，
+     * 中间留一小段延时给硬件消化 RPC 销毁，降低把 VPU 带入脏状态的风险。
+     * 延时值是保守默认（50ms），待真机对照校准（见 06 文档第九节）。
+     */
+    auto rebuildStream = [&]() -> bool {
+        std::int64_t last = lastStreamRebuildMs_.load();
+        std::int64_t now = steadyNowMs();
+        if (last > 0 && now - last < kSeekRebuildMinGapMs)
+            std::this_thread::sleep_for(std::chrono::milliseconds(
+                (size_t)(kSeekRebuildMinGapMs - (now - last))));
+        if (videoStream) {
+            vpuLog("rebuild: FreeStream enter");
+            SLVideo_FreeStream(videoStream);
+            videoStream = nullptr;
+            vpuLog("rebuild: FreeStream done");
+        }
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(kStreamRebuildGapMs));
+        /* 重建也带有限复位重试，避免重建瞬间碰到脏硬件直接失败 */
+        for (int attempt = 0; attempt <= kVpuInitRetryCount; ++attempt) {
+            vpuLog("rebuild: CreateStream enter attempt=%d", attempt);
+            videoStream =
+                SLVideo_CreateStream(videoContext, k_ESLVideoFormatH264, 0);
+            vpuLog("rebuild: CreateStream result=%p", (void*)videoStream);
+            if (videoStream)
+                break;
+            if (attempt < kVpuInitRetryCount) {
+                if (videoContext) {
+                    SLVideo_FreeContext(videoContext);
+                    videoContext = nullptr;
+                }
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(kVpuInitRetryDelayMs));
+                videoContext = SLVideo_CreateContext();
+                if (!videoContext)
+                    return false;
+            }
+        }
+        if (!videoStream)
+            return false;
+        applyStreamParams();
+        lastStreamRebuildMs_.store(steadyNowMs());
+        return true;
+    };
+
+    /* 独立音轨（DASH）：主地址失败时顺序尝试备份地址 */
+    if (spec.disableAudio) {
+        fprintf(stderr, "[SlPlayer] disableAudio=1，跳过音频\n");
+    } else if (!spec.audioUrls.empty()) {
+        audioContext = SLAudio_CreateContext();
+        bool opened = false;
+        for (const std::string& url : spec.audioUrls) {
+            fprintf(stderr, "[SlPlayer] 打开音频源: %.80s...\n", url.c_str());
+            if (audioSource_.open(url, spec.referrer, userAgent())) {
+                opened = true;
+                break;
+            }
+            fprintf(stderr, "[SlPlayer] 音频地址失败: %s\n",
+                    audioSource_.error().c_str());
+        }
+        if (audioContext && opened && audioSource_.audioIndex() >= 0) {
+            selfDemux = true;
+            audioReady = audio_.start(audioContext, audioSource_.format(),
+                                      audioSource_.audioIndex(), true);
+        }
+    } else if (videoSource_.audioIndex() >= 0) {
+        audioContext = SLAudio_CreateContext();
+        if (audioContext) {
+            audioReady = audio_.start(audioContext, format,
+                                      videoSource_.audioIndex(), false);
+        }
+    }
+
+    if (!audioReady && audioContext) {
+        SLAudio_FreeContext(audioContext);
+        audioContext = nullptr;
+    }
+    if (!audioReady)
+        fprintf(stderr, "[SlPlayer] 无可用音频，静音播放\n");
+    else
+        fprintf(stderr, "[SlPlayer] 音频就绪\n");
+    audio_.setVolume(volume_.load());
+    fprintf(stderr, "[SlPlayer] 进入播放循环\n");
+
+    auto doSeek = [&](double target, std::uint64_t requestId,
+                      bool rebuildVideo = true) -> bool {
+        seeking_ = true;
+        pauseFlushed_ = false;
+        resumeSeek_ = false;
+        if (duration > 0.0)
+            target = std::min(target, std::max(0.0, duration - 0.1));
+        if (target < 0.0)
+            target = 0.0;
+        const double requestedTarget = target;
+
+        int64_t ts = av_rescale_q((int64_t)(target * AV_TIME_BASE),
+                                  AV_TIME_BASE_Q, stream->time_base);
+        if (videoSource_.remote())
+            videoSource_.beginSeek(target);
+        bool ok = av_seek_frame(format, videoIndex, ts, AVSEEK_FLAG_BACKWARD) >= 0;
+        if (videoSource_.remote())
+            videoSource_.endSeek();
+        havePendingPacket = false;
+        if (ok) {
+            avformat_flush(format);
+            av_bsf_flush(bsf);
+
+            /* 取实际关键帧 PTS：SLVideo 只能从关键帧开始喂，音频必须对齐到这里 */
+            while (pendingPacket) {
+                int readRet = av_read_frame(format, pendingPacket);
+                if (readRet < 0)
+                    break;
+                if (pendingPacket->stream_index == videoIndex) {
+                    if (pendingPacket->pts != AV_NOPTS_VALUE)
+                        target = pendingPacket->pts * av_q2d(stream->time_base);
+                    havePendingPacket = true;
+                    break;
+                }
+                av_packet_unref(pendingPacket);
+            }
+        } else {
+            fprintf(stderr, "[SlPlayer] 视频跳转失败（可能超出缓冲窗口）\n");
+        }
+        fprintf(stderr, "[SlPlayer] seek: request=%.3f key=%.3f ok=%d\n",
+                requestedTarget, target, ok ? 1 : 0);
+
+        if (audioReady) {
+            if (selfDemux)
+                audioSource_.beginSeek(requestedTarget);
+            audio_.seek(requestedTarget);
+            if (selfDemux)
+                audioSource_.endSeek();
+        }
+        audioBaseMs = requestedTarget * 1000.0;
+        seekDisplayTargetMs = requestedTarget * 1000.0;
+        firstFramePtsAfterSeekMs = -1.0;
+        firstFrameAfterSeekRecorded = false;
+        /* seek 后让音频解码进预缓冲，但不调用 scheduleStart 前不会提交；
+         * 这样视频首帧稳定时 skip 才有真实预缓冲可跳过。 */
+        audio_.setPaused(false);
+
+        /* 新建流后尚未提交帧、或暂停已 flush 过时，不需要再 Free/Create 一次；
+         * 高 refs 片源每次重建都会消耗 VPU/SHM 连续块，频繁重建会触发 shm_driver 失败。 */
+        if (rebuildVideo) {
+            if (!rebuildStream()) {
+                emitFatal(FatalType::VpuRebuildFailed, "seek 后重建 SLVideo stream 失败");
+                emit(EventType::Error, "seek 后重建 SLVideo stream 失败");
+                seeking_ = false;
+                stop_ = true;
+                return false;
+            }
+        }
+
+        videoStarted = false;
+        afterSeek = true;
+        audioScheduled = false;
+        queueMax = 0;
+        queueFlatFrames = 0;
+        maxSubmittedMs = target * 1000.0;
+        videoClock = target;
+        position_ = target;
+        nextDeadline = std::chrono::steady_clock::now();
+        seeking_ = false;
+        /* 新 seek 已到达时，旧 seek 的内部重建仍可能结束；不得覆盖新目标。 */
+        if (requestId == 0 || requestId == latestSeekRequestId_.load())
+            emit(EventType::Seeked, std::string(), requestId);
+        return ok;
+    };
+
+    packet = av_packet_alloc();
+    filtered = av_packet_alloc();
+    pendingPacket = av_packet_alloc();
+    if (!packet || !filtered || !pendingPacket) {
+        fail("AVPacket 分配失败");
+        return;
+    }
+
+    if (spec.startSeconds > 0.5)
+        doSeek(spec.startSeconds, 0, false);
+
+    while (!stop_) {
+        if (pauseFlush_.exchange(false)) {
+            /* 丢弃 SLVideo 里已排队但还没上屏的画面，暂停点取当前呈现位置 */
+            double at = position_.load();
+            if (!rebuildStream()) {
+                emitFatal(FatalType::VpuRebuildFailed, "暂停时重建 SLVideo stream 失败");
+                fail("暂停时重建 SLVideo stream 失败");
+                return;
+            }
+            videoStarted = false;
+            afterSeek = true;
+            audioScheduled = false;
+            queueMax = 0;
+            queueFlatFrames = 0;
+            maxSubmittedMs = at * 1000.0;
+            videoClock = at;
+            resumeTarget_ = at;
+            pauseFlushed_ = true;
+            /* 与 Kodi FlushBuffers 一致：视频队列清空后才停音频。 */
+            audio_.setPaused(true);
+            fprintf(stderr, "[SlPlayer] 暂停: 清空视频队列 @ %.2f s\n", at);
+            resumeInProgress_ = false;
+            if (targetPaused_.load()) {
+                paused_ = true;
+                emit(EventType::Paused, std::string(), pauseRequestId_.load());
+                pauseRequestId_ = 0;
+            } else {
+                /* pause/resume 在 flush 期间连续到达：以最新目标为准，直接补恢复。 */
+                resumeTarget_ = at;
+                resumeSeek_ = true;
+            }
+        }
+
+        double target = pendingSeek_.exchange(-1.0);
+        std::uint64_t seekRequestId = pendingSeekId_.exchange(0);
+        if (target >= 0.0) {
+            doSeek(target, seekRequestId);
+        } else if (resumeSeek_.exchange(false)) {
+            std::uint64_t resumeRequestId = resumeRequestId_.load();
+            if (paused_.load()) {
+                pendingResumeRequestId = resumeRequestId;
+                pendingResumeEvent = true;
+            }
+            resumeRequestId_ = 0;
+            /* 暂停 flush 已经重建并清空过视频队列，恢复时只重新定位 demuxer。 */
+            doSeek(resumeTarget_.load(), 0, false);
+            /* 允许播放线程提交恢复后的首帧；Resumed 事件仍等首帧完成再发。 */
+            if (pendingResumeEvent)
+                paused_ = false;
+        }
+
+        if (stop_)
+            break;
+
+        if (paused_) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            continue;
+        }
+
+        stage_ = 1;
+        int ret;
+        if (havePendingPacket) {
+            av_packet_move_ref(packet, pendingPacket);
+            havePendingPacket = false;
+            ret = 0;
+        } else {
+            ret = av_read_frame(format, packet);
+        }
+        stage_ = 2;
+        if (ret < 0) {
+            if (stop_)
+                break;
+            if (ret == AVERROR_EOF) {
+                emit(EventType::EndFile);
+                break;
+            }
+            char text[128];
+            av_strerror(ret, text, sizeof(text));
+            fail(std::string("读取失败: ") + text);
+            return;
+        }
+
+        if (packet->stream_index == videoIndex) {
+            if (packet->pts != AV_NOPTS_VALUE)
+                videoClock = packet->pts * av_q2d(stream->time_base);
+
+            stage_ = 20;
+            ret = av_bsf_send_packet(bsf, packet);
+            stage_ = 21;
+            if (ret >= 0) {
+                while (av_bsf_receive_packet(bsf, filtered) == 0) {
+                    stage_ = 22;
+                    if (filtered->size <= 0) {
+                        av_packet_unref(filtered);
+                        continue;
+                    }
+
+                    const uint8_t* frameData = filtered->data;
+                    int frameSize = filtered->size;
+                    if (rewriteSps && annexBContainsSps(frameData, (size_t)frameSize)) {
+                        int patched = 0;
+                        if (patchAnnexBSps(frameData, (size_t)frameSize, rewriteBuffer,
+                                           spsTargetRefs, effectiveSpsReorder,
+                                           effectiveSpsBuffering, &patched) &&
+                            patched > 0) {
+                            frameData = rewriteBuffer.data();
+                            frameSize = (int)rewriteBuffer.size();
+                            if (spsFrameLogs < 3) {
+                                H264SpsInfo frameSps =
+                                    parseFirstSpsAnnexB(frameData, (size_t)frameSize);
+                                fprintf(stderr,
+                                        "[SlPlayer] 帧内 SPS: refs=%d reorder=%d "
+                                        "buffering=%d\n",
+                                        frameSps.refs, frameSps.reorder,
+                                        frameSps.buffering);
+                                spsFrameLogs++;
+                            }
+                        } else if (spsFrameLogs < 3) {
+                            fprintf(stderr, "[SlPlayer] 帧内 SPS 改写失败\n");
+                            spsFrameLogs++;
+                        }
+                    }
+
+                    if (dumpFramePath && !frameDumped) {
+                        frameDumped = true;
+                        FILE* dump = fopen(dumpFramePath, "wb");
+                        if (dump) {
+                            fwrite(frameData, 1, (size_t)frameSize, dump);
+                            fclose(dump);
+                            fprintf(stderr, "[SlPlayer] 首帧已导出: %d 字节\n",
+                                    frameSize);
+                        }
+                    }
+
+                    stage_ = 30;
+                    uint32_t queued = SLVideo_GetQueuedVideoMS(videoStream);
+                    stage_ = 31;
+                    videoQueueMs_ = queued;
+                    int waited = 0;
+                    while (SLVideo_GetQueuedVideoMS(videoStream) > kVideoQueueMaxMs) {
+                        if (stop_ || waited >= 500)
+                            break;
+                        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                        waited += 5;
+                    }
+                    stage_ = 32;
+
+                    int beginResult = 0;
+                    int retries = 0;
+                    stage_ = 3;
+                    while ((beginResult = SLVideo_BeginFrame(videoStream,
+                                                             frameSize)) != 0) {
+                        if (++retries > 100 || stop_)
+                            break;
+                        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    }
+                    beginRetries_ += retries;
+
+                    /* 第 2 步：BeginFrame 重试耗尽（非主动 stop）= 帧提交停滞，主动上报。
+                     * 注意仍走原来的丢帧继续逻辑，不在这里改播放行为；上报只是让上层
+                     * watchdog 能提前知道硬件异常，心跳停滞判定作为另一道保险。 */
+                    if (beginResult != 0 && !stop_) {
+                        emitFatal(FatalType::FrameSubmitStalled,
+                                  "SLVideo_BeginFrame 连续重试耗尽");
+                    }
+
+                    bool submitted = false;
+                    if (beginResult == 0 && !stop_) {
+                        if (SLVideo_WriteFrameData(videoStream, (void*)frameData,
+                                                   frameSize) == 0 &&
+                            SLVideo_SubmitFrame(videoStream) == 0) {
+                            submitted = true;
+                        } else {
+                            fprintf(stderr, "[SlPlayer] 视频帧提交失败，丢弃\n");
+                        }
+                    }
+                    if (!submitted) {
+                        droppedFrames_++;
+                        av_packet_unref(filtered);
+                        continue;
+                    }
+
+                    stage_ = 4;
+                    videoFrames++;
+                    videoFrames_ = videoFrames;
+                    /* 心跳：每次成功 SubmitFrame 更新单调时间戳 */
+                    lastFrameTimeMs_ = steadyNowMs();
+
+                    double frameMs = videoClock * 1000.0;
+                    if (filtered->pts != AV_NOPTS_VALUE)
+                        frameMs = filtered->pts * av_q2d(stream->time_base) * 1000.0;
+                    if (frameMs > maxSubmittedMs)
+                        maxSubmittedMs = frameMs;
+                    double submittedMs = maxSubmittedMs;
+                    stage_ = 40;
+                    uint32_t queuedNow = SLVideo_GetQueuedVideoMS(videoStream);
+                    stage_ = 41;
+                    videoQueueMs_ = queuedNow;
+                    double presentationMs = submittedMs - (double)queuedNow;
+                    if (presentationMs < 0.0)
+                        presentationMs = 0.0;
+                    position_ = presentationMs / 1000.0;
+
+                    if (!videoStarted) {
+                        videoStarted = true;
+                        emit(EventType::PlaybackStart);
+                    }
+
+                    /* seek/暂停恢复：按首帧 PTS 与实测上屏延迟安排音频启动时点，
+                     * 不再依赖 GetQueuedVideoMS 在重建初期的瞬时值或 3s 截断兜底。 */
+                    if (afterSeek && !firstFrameAfterSeekRecorded) {
+                        firstFrameAfterSeekRecorded = true;
+                        firstFramePtsAfterSeekMs = frameMs;
+                        if (audioReady && measuredVideoLatencyMs > 0) {
+                            int delayMs = measuredVideoLatencyMs +
+                                          (int)(seekDisplayTargetMs - frameMs);
+                            if (delayMs < 0)
+                                delayMs = 0;
+                            audio_.setPaused(false);
+                            audio_.scheduleStart(delayMs, 0);
+                            audioScheduled = true;
+                            afterSeek = false;
+                            syncLog("seek start: target=%.0f first=%.0f latency=%d delay=%d",
+                                    seekDisplayTargetMs, frameMs,
+                                    measuredVideoLatencyMs, delayMs);
+                            fprintf(stderr,
+                                    "[SlPlayer] seek 对齐: 目标 %.0f ms / 首帧 %.0f ms / "
+                                    "上屏延迟 %d ms / 音频延时 %d ms\n",
+                                    seekDisplayTargetMs, frameMs,
+                                    measuredVideoLatencyMs, delayMs);
+                        }
+                    }
+
+                    /* 恢复完成的定义：视频首帧已重建、音频启动已安排；
+                     * 此刻才发布当前暂停态，UI 图标不会再早于真实播放。 */
+                    if (pendingResumeEvent && firstFrameAfterSeekRecorded) {
+                        if (!targetPaused_.load()) {
+                            emit(EventType::Resumed, std::string(),
+                                 pendingResumeRequestId);
+                        }
+                        pendingResumeRequestId = 0;
+                        pendingResumeEvent = false;
+                        resumeInProgress_ = false;
+                    }
+
+                    if (audioReady && !audioScheduled && videoFrames > 1 &&
+                        queuedNow > 0) {
+                        if (queuedNow > queueMax + 5) {
+                            queueMax = queuedNow;
+                            queueFlatFrames = 0;
+                        } else {
+                            queueFlatFrames++;
+                        }
+
+                        /* 初始播放与 seek/暂停恢复统一按“已呈现内容”对齐；
+                         * 固定 300ms 会在高参考帧/慢上屏时留下固定音画偏移。 */
+                        if ((afterSeek || submittedMs > 1500.0) &&
+                            queueFlatFrames >= 5) {
+                            double offsetMs = presentationMs - audioBaseMs;
+                            int skipMs = (int)std::max(0.0, std::min(offsetMs, 3000.0));
+                            int delayMs = (int)std::max(0.0, std::min(-offsetMs, 5000.0));
+                            /* 带 start= 打开时第一帧也处于 afterSeek，旧条件会让
+                             * measuredVideoLatencyMs 永远是 0，后续 seek 全部走
+                             * 兜底分支而不是首帧对齐，表现为快进后音画不同步。 */
+                            if (measuredVideoLatencyMs <= 0)
+                                measuredVideoLatencyMs = (int)queuedNow;
+                            audio_.setPaused(false);
+                            audio_.scheduleStart(delayMs, skipMs);
+                            audioScheduled = true;
+                            afterSeek = false;
+                            fprintf(stderr,
+                                    "[SlPlayer] 视频已上屏: 内容 %.0f ms, 呈现 %.0f ms, "
+                                    "目标 %.0f ms, 队列 %u ms, 音频延时 %d ms, 跳过 %d ms\n",
+                                    submittedMs, presentationMs, audioBaseMs,
+                                    queuedNow, delayMs, skipMs);
+                        }
+                    }
+                    if (audioReady && !audioScheduled &&
+                        (!afterSeek && submittedMs > 8000.0)) {
+                        double offsetMs = presentationMs - audioBaseMs;
+                        int skipMs = (int)std::max(0.0, std::min(offsetMs, 10000.0));
+                        int delayMs = (int)std::max(0.0, std::min(-offsetMs, 5000.0));
+                        audio_.setPaused(false);
+                        audio_.scheduleStart(delayMs, skipMs);
+                        audioScheduled = true;
+                        fprintf(stderr,
+                                "[SlPlayer] 队列迟迟未稳定，音频兜底启动: "
+                                "present=%.0f ms base=%.0f ms delay=%d ms skip=%d ms\n",
+                                presentationMs, audioBaseMs, delayMs, skipMs);
+                    }
+
+                    stage_ = 42;
+                    av_packet_unref(filtered);
+
+                    auto now = std::chrono::steady_clock::now();
+                    if (!seeking_.load() &&
+                        now - lastProgress >= std::chrono::milliseconds(250)) {
+                        lastProgress = now;
+                        emit(EventType::Progress);
+                    }
+                    stage_ = 43;
+
+                    nextDeadline += std::chrono::microseconds(
+                        (int64_t)(1000000.0 / fps));
+                    stage_ = 5;
+                    if (nextDeadline > now)
+                        std::this_thread::sleep_until(nextDeadline);
+                    else
+                        nextDeadline = now;
+                    stage_ = 6;
+
+                    if (spec.endSeconds > 0.0 &&
+                        position_.load() >= spec.endSeconds) {
+                        emit(EventType::EndFile);
+                        stop_ = true;
+                    }
+                    if (stop_)
+                        break;
+                }
+            }
+        } else if (audioReady && !selfDemux &&
+                   packet->stream_index == videoSource_.audioIndex()) {
+            audio_.putPacket(packet);
+        }
+
+        av_packet_unref(packet);
+    }
+
+    shutdown();
+}
+
+/* ---------------- Player 公共接口 ---------------- */
+
+Player::Player() : impl_(new Impl()) {}
+
+Player::~Player() = default;
+
+void Player::setEventCallback(EventCallback callback) {
+    impl_->setEventCallback(std::move(callback));
+}
+
+void Player::setFatalCallback(FatalCallback callback) {
+    impl_->setFatalCallback(std::move(callback));
+}
+
+void Player::setVolume(int volume) { impl_->setVolume(volume); }
+
+bool Player::open(const SourceSpec& spec) { return impl_->start(spec); }
+
+void Player::play(std::uint64_t requestId) { impl_->setPaused(false, requestId); }
+
+void Player::pause(std::uint64_t requestId) { impl_->setPaused(true, requestId); }
+
+bool Player::isPaused() const { return impl_->paused_; }
+
+bool Player::isRunning() const { return impl_->running_; }
+
+void Player::stop() { impl_->stop(); }
+
+void Player::seek(double seconds, std::uint64_t requestId) {
+    impl_->requestSeek(seconds, requestId);
+}
+
+double Player::position() const { return impl_->position_.load(); }
+
+double Player::duration() const { return impl_->duration_.load(); }
+
+VideoInfo Player::videoInfo() const {
+    std::lock_guard<std::mutex> lock(impl_->infoMutex);
+    return impl_->info_;
+}
+
+Stats Player::stats() const { return impl_->stats(); }
+
+Heartbeat Player::heartbeat() const { return impl_->heartbeat(); }
+
+} // namespace sl

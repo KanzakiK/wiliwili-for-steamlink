@@ -1,36 +1,22 @@
-*build/
-data/
+# 构建产物
+/demo/slvideo_test/slvideo_test
+/demo/ffmpeg_demux_test/ffmpeg_demux_test
+/demo/ffmpeg_player/ffmpeg_player
+/demo/ffmpeg_stream/ffmpeg_stream
+*.o
+*.a
+*.so
+*.log
+
+# 生成的测试码流（可用 ffmpeg 重新生成）
+demo/**/*.264
+demo/**/*.mp4
+demo/**/*.flv
+
+# 编辑器 / 系统 / 工具临时目录
+.vscode/
 .idea/
-cmake-*/
-.gdbinit
-resources/nsp_forwarder.nsp
-tasks.json
-settings.json
-ffmpeg-*
-mpv-*
-*.tar.*
-config/
-.flatpak-builder/
-pack/
-repo/
-*.flatpak
-.vscode
-.xmake
-.vs
+.screenshots/
+.workbuddy/
+Thumbs.db
 .DS_Store
-/winrt/AppxManifest.xml
-libromfs-generator
-build-*
-android-project
-*.deb
-*.dmp
-# Github Copilot
-.github/copilot-instructions.md
-.github/instructions/
-.github/prompts/
-.github/chatmodes/
-# Claude Code
-.claude/
-CLAUDE.md
-# Other AI
-AGENT.md
