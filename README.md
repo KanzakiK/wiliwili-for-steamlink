@@ -62,16 +62,6 @@ DEVICE=root@<device-address> PASS=<device-password> sh tools/steamlink-app/insta
 
 更多命令、日志位置和排查步骤见 [docs/04-构建与真机调试.md](docs/04-构建与真机调试.md)。
 
-## 开发纪律
-
-- 任务只维护在 [docs/00-当前状态与任务.md](docs/00-当前状态与任务.md)。
-- 开发日志、真机证据与历史结论只写在 [docs/02-开发进度日志.md](docs/02-开发进度日志.md)。
-- 落地前复核真实代码/SDK；落地后做分层回归；视觉和听觉结论必须有截图或用户确认。
-- 不在用户播放测试时强杀进程部署；VPU 场景先恢复干净基线。
-- `/tmp` 是 tmpfs，禁止放二进制、资源或测试视频。
-
-完整纪律见 [docs/07-开发纪律.md](docs/07-开发纪律.md)。
-
 ## 仓库结构
 
 - `player/`：SlPlayer、IPC daemon、音频管线和 HTTP 源。
