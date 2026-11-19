@@ -53,6 +53,16 @@ add_executable(session_meta_test test/session_meta_test.c)
 target_include_directories(session_meta_test PRIVATE include)
 target_compile_options(session_meta_test PRIVATE -Wall -Wextra)
 
+# D27 compat 发送端集成测试：假 daemon 只收帧，不打开 SlPlayer/VPU。
+add_executable(compat_session_test
+    test/compat_session_test.c
+    ${PROJECT_SOURCE_DIR}/../tools/mpv-stub/mpv_stub.c)
+target_include_directories(compat_session_test PRIVATE
+    include
+    $ENV{HOME}/mpv-stub/include)
+target_compile_options(compat_session_test PRIVATE -Wall -Wextra -D_DEFAULT_SOURCE)
+target_link_libraries(compat_session_test PRIVATE pthread)
+
 # 兼容层独立验证程序（链 libmpv.a，模拟 wiliwili 调用序列）
 # 兼容层库路径由 -DMPV_COMPAT_LIB 指定，默认 ~/mpv-stub/lib/libmpv.a
 if(NOT MPV_COMPAT_LIB)

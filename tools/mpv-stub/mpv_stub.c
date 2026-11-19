@@ -109,6 +109,11 @@ struct mpv_handle {
     double initialSeekTarget;
     int hasInitialSeekTarget;
 
+    /* D27：当前文件实例的 debug session；由 replace 的 loadfile extra 建立，
+     * 备用源切换和 watchdog 回放复用。 */
+    sl_session_meta_t sessionMeta;
+    int hasSessionMeta;
+
     /* 断连恢复所需的播放快照 */
     int hasLastOpen;
     char lastOpenCmd[65536];
@@ -225,6 +230,48 @@ static int send_cmd(mpv_handle *ctx, const char *cmd) {
     if (!ctx) return MPV_ERROR_INVALID_PARAMETER;
     if (send_frame(ctx, cmd, strlen(cmd)) < 0) return MPV_ERROR_GENERIC;
     return MPV_ERROR_SUCCESS;
+}
+
+/* 同一把 tx 锁内写 meta+open 两帧，防止其他命令插到两者之间。
+ * 无 session 时退化为只发 open，正式启动路径行为不变。 */
+static int send_session_meta_and_open(mpv_handle *ctx, uint64_t gen, uint64_t req,
+                                      const char *openCmd) {
+    if (!ctx || !openCmd) return MPV_ERROR_INVALID_PARAMETER;
+    char metaFrame[2048];
+    size_t metaLen = 0;
+    sl_session_meta_t meta;
+    int hasMeta = 0;
+
+    pthread_mutex_lock(&ctx->daemonMutex);
+    if (ctx->sock < 0) {
+        pthread_mutex_unlock(&ctx->daemonMutex);
+        return MPV_ERROR_GENERIC;
+    }
+    int fd = ctx->sock;
+    hasMeta = ctx->hasSessionMeta;
+    if (hasMeta) meta = ctx->sessionMeta;
+
+    if (hasMeta) {
+        char args[1024];
+        size_t n = sl_session_meta_format_args(&meta, args, sizeof(args));
+        if (n == 0)
+            hasMeta = 0;
+        else
+            metaLen = (size_t)snprintf(metaFrame, sizeof(metaFrame),
+                                       "%s\t%llu\t%llu\t%s", SL_CMD_META,
+                                       (unsigned long long)gen,
+                                       (unsigned long long)req, args);
+    }
+
+    pthread_mutex_lock(&ctx->txMutex);
+    int rc = 0;
+    if (hasMeta && metaLen > 0 && metaLen < sizeof(metaFrame))
+        rc = send_payload(fd, metaFrame, metaLen);
+    if (rc == 0)
+        rc = send_payload(fd, openCmd, strlen(openCmd));
+    pthread_mutex_unlock(&ctx->txMutex);
+    pthread_mutex_unlock(&ctx->daemonMutex);
+    return rc == 0 ? MPV_ERROR_SUCCESS : MPV_ERROR_GENERIC;
 }
 
 /* P0 统一命令信封：name<TAB>fileGen<TAB>requestId<TAB>可选参数。 */
@@ -714,7 +761,7 @@ static int recover_daemon_connection(mpv_handle *ctx) {
         fprintf(stderr, "[mpv-compat] 恢复播放: gen=%llu req=%llu pos=%.3f pause=%d\n",
                 (unsigned long long)replayGen, (unsigned long long)replayReq,
                 pos, expPause);
-        if (send_cmd(ctx, openCmd) != MPV_ERROR_SUCCESS)
+        if (send_session_meta_and_open(ctx, replayGen, replayReq, openCmd) != MPV_ERROR_SUCCESS)
             fprintf(stderr, "[mpv-compat] 恢复播放的 open 命令发送失败\n");
     }
     fire_wakeup(ctx);
@@ -858,7 +905,7 @@ static int try_failover(mpv_handle *ctx) {
     fprintf(stderr, "[mpv-compat] 主源失败，切换备用源: gen=%llu req=%llu（剩余 %d）\n",
             (unsigned long long)failoverGen, (unsigned long long)failoverReq,
             ctx->backupCount);
-    send_cmd(ctx, openCmd);
+    send_session_meta_and_open(ctx, failoverGen, failoverReq, openCmd);
     return 1;
 }
 
@@ -1306,6 +1353,8 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
             /* extra 是含 '=' 且不是纯 "0" 的串 */
             if (strcmp(args[i], "0") != 0 && strchr(args[i], '=')) { extra = args[i]; break; }
         }
+        sl_session_meta_t session;
+        int hasSession = sl_session_meta_parse_extra(extra, &session) == 1;
         char buf[65000];
         build_open_cmd(url, method, extra, buf, sizeof(buf));
         pthread_mutex_lock(&ctx->daemonMutex);
@@ -1356,6 +1405,8 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
         ctx->initialSeekTarget = ctx->resumePosition;
         ctx->hasInitialSeekTarget = ctx->initialSeekTarget > 0.0;
         ctx->lastResumeMs = monotonicMs();
+        ctx->sessionMeta = session;
+        ctx->hasSessionMeta = hasSession;
         pthread_mutex_unlock(&ctx->daemonMutex);
         clear_queued_events(ctx);
         reset_props_for_new_file(ctx, url);
@@ -1367,7 +1418,7 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
         fprintf(stderr, "[mpv-compat] loadfile: gen=%llu req=%llu tag=%s %s\n",
                 (unsigned long long)openGen, (unsigned long long)openReq,
                 mediaTag ? mediaTag : "-", url);
-        return send_cmd(ctx, frame);
+        return send_session_meta_and_open(ctx, openGen, openReq, frame);
     }
     if (strcmp(cmd, "set") == 0) {
         const char *prop = args[1] ? args[1] : "";

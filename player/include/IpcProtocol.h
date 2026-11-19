@@ -64,6 +64,26 @@ typedef struct {
     char id[SL_META_FIELD_MAX];
 } sl_session_meta_t;
 
+static inline int sl_session_meta_assign(sl_session_meta_t *meta,
+                                         const char *key, const char *value) {
+    if (!meta || !key || !value)
+        return -1;
+    char *dst = NULL;
+    if (strcmp(key, SL_META_RUN_KEY) == 0)
+        dst = meta->run;
+    else if (strcmp(key, SL_META_SESSION_KEY) == 0)
+        dst = meta->session;
+    else if (strcmp(key, SL_META_CONTENT_KEY) == 0)
+        dst = meta->content;
+    else if (strcmp(key, SL_META_ID_KEY) == 0)
+        dst = meta->id;
+    if (!dst)
+        return 0;
+    if (!*value || strchr(value, '=') || strchr(value, ' '))
+        return -1;
+    return snprintf(dst, SL_META_FIELD_MAX, "%s", value) >= SL_META_FIELD_MAX ? -1 : 0;
+}
+
 static inline void sl_session_meta_clear(sl_session_meta_t *meta) {
     if (meta)
         memset(meta, 0, sizeof(*meta));
@@ -87,21 +107,8 @@ static inline int sl_session_meta_parse_kv_list(const char *list, char sep,
             char *eq = strchr(pair, '=');
             if (eq) {
                 *eq = '\0';
-                const char *value = eq + 1;
-                char *dst = NULL;
-                if (strcmp(pair, SL_META_RUN_KEY) == 0)
-                    dst = meta->run;
-                else if (strcmp(pair, SL_META_SESSION_KEY) == 0)
-                    dst = meta->session;
-                else if (strcmp(pair, SL_META_CONTENT_KEY) == 0)
-                    dst = meta->content;
-                else if (strcmp(pair, SL_META_ID_KEY) == 0)
-                    dst = meta->id;
-                if (dst) {
-                    if (!*value || strchr(value, '=') || strchr(value, ' ') ||
-                        snprintf(dst, SL_META_FIELD_MAX, "%s", value) >= SL_META_FIELD_MAX)
-                        return -1;
-                }
+                if (sl_session_meta_assign(meta, pair, eq + 1) < 0)
+                    return -1;
             }
         }
         if (!delim)
@@ -111,8 +118,38 @@ static inline int sl_session_meta_parse_kv_list(const char *list, char sep,
     return meta->run[0] && meta->session[0] && meta->content[0] && meta->id[0] ? 1 : 0;
 }
 
+/* loadfile extra 里 audio-file URL 可能含逗号，必须按引号外的逗号切分。
+ * 与 build_open_cmd 的 referrer/audio-file 解析保持同一套语义。 */
 static inline int sl_session_meta_parse_extra(const char *extra, sl_session_meta_t *meta) {
-    return sl_session_meta_parse_kv_list(extra, ',', meta);
+    if (!extra || !meta)
+        return 0;
+    sl_session_meta_clear(meta);
+    char item[512];
+    size_t len = 0;
+    int inQuote = 0;
+    for (const char *p = extra;; ++p) {
+        char c = *p;
+        if (c == '"') {
+            inQuote = !inQuote;
+            continue;
+        }
+        if ((c == ',' && !inQuote) || c == '\0') {
+            item[len] = '\0';
+            char *eq = strchr(item, '=');
+            if (eq) {
+                *eq = '\0';
+                if (sl_session_meta_assign(meta, item, eq + 1) < 0)
+                    return -1;
+            }
+            if (c == '\0')
+                break;
+            len = 0;
+            continue;
+        }
+        if (len + 1 < sizeof(item))
+            item[len++] = c;
+    }
+    return meta->run[0] && meta->session[0] && meta->content[0] && meta->id[0] ? 1 : 0;
 }
 
 /* 生成 meta 命令参数字段；返回写入长度，cap 不足时返回 0。 */

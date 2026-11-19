@@ -42,6 +42,13 @@ int main(void) {
     CHECK(sl_session_meta_parse_extra("start=120", &meta) == 0);
     CHECK(sl_session_meta_parse_extra(
               "run=20261119-120000-1234,session=s1,content=video,id=", &meta) == -1);
+    CHECK(sl_session_meta_parse_extra(
+              "referrer=\"https://example.invalid/?a=1,b=2\","
+              "run=r1,session=r1-1,content=video,id=BVTEST,"
+              "audio-file=\"https://example.invalid/a.m4s?x=1,y=2\"",
+              &meta) == 1);
+    CHECK(strcmp(meta.run, "r1") == 0);
+    CHECK(strcmp(meta.id, "BVTEST") == 0);
 
     const char *metaArgs =
         "run=20261119-120000-1234\tsession=20261119-120000-1234-1\t"
