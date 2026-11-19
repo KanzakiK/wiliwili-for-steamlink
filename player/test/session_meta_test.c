@@ -43,6 +43,15 @@ int main(void) {
     CHECK(sl_session_meta_parse_extra(
               "run=20261119-120000-1234,session=s1,content=video,id=", &meta) == -1);
 
+    const char *metaArgs =
+        "run=20261119-120000-1234\tsession=20261119-120000-1234-1\t"
+        "content=live\tid=123456";
+    CHECK(sl_session_meta_parse_kv_list(metaArgs, SL_IPC_FIELD_SEP, &meta) == 1);
+    CHECK(strcmp(meta.run, "20261119-120000-1234") == 0);
+    CHECK(strcmp(meta.session, "20261119-120000-1234-1") == 0);
+    CHECK(strcmp(meta.content, "live") == 0);
+    CHECK(strcmp(meta.id, "123456") == 0);
+
     printf("session meta contract ok\n");
     return 0;
 }

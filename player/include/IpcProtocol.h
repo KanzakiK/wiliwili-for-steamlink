@@ -69,17 +69,17 @@ static inline void sl_session_meta_clear(sl_session_meta_t *meta) {
         memset(meta, 0, sizeof(*meta));
 }
 
-/* 解析 UI extra 中的调试字段：run=...,session=...,content=...,id=...。
- * extra 还包含 referrer/start/audio-file 等键；未知键一律忽略。
- * 返回 1 表示四个字段齐全，0 表示缺少字段，-1 表示字段过长或非法。 */
-static inline int sl_session_meta_parse_extra(const char *extra, sl_session_meta_t *meta) {
-    if (!extra || !meta)
+/* 解析 key=value 列表：extra 用 ','，IPC meta 参数用 TAB。
+ * 未知键一律忽略；返回 1 表示四个字段齐全，0 表示缺字段，-1 表示非法。 */
+static inline int sl_session_meta_parse_kv_list(const char *list, char sep,
+                                                sl_session_meta_t *meta) {
+    if (!list || !meta)
         return 0;
     sl_session_meta_clear(meta);
-    const char *p = extra;
+    const char *p = list;
     while (*p) {
-        const char *comma = strchr(p, ',');
-        size_t len = comma ? (size_t)(comma - p) : strlen(p);
+        const char *delim = strchr(p, sep);
+        size_t len = delim ? (size_t)(delim - p) : strlen(p);
         if (len > 0 && len < 512) {
             char pair[512];
             memcpy(pair, p, len);
@@ -87,16 +87,15 @@ static inline int sl_session_meta_parse_extra(const char *extra, sl_session_meta
             char *eq = strchr(pair, '=');
             if (eq) {
                 *eq = '\0';
-                const char *key = pair;
                 const char *value = eq + 1;
                 char *dst = NULL;
-                if (strcmp(key, SL_META_RUN_KEY) == 0)
+                if (strcmp(pair, SL_META_RUN_KEY) == 0)
                     dst = meta->run;
-                else if (strcmp(key, SL_META_SESSION_KEY) == 0)
+                else if (strcmp(pair, SL_META_SESSION_KEY) == 0)
                     dst = meta->session;
-                else if (strcmp(key, SL_META_CONTENT_KEY) == 0)
+                else if (strcmp(pair, SL_META_CONTENT_KEY) == 0)
                     dst = meta->content;
-                else if (strcmp(key, SL_META_ID_KEY) == 0)
+                else if (strcmp(pair, SL_META_ID_KEY) == 0)
                     dst = meta->id;
                 if (dst) {
                     if (!*value || strchr(value, '=') || strchr(value, ' ') ||
@@ -105,11 +104,15 @@ static inline int sl_session_meta_parse_extra(const char *extra, sl_session_meta
                 }
             }
         }
-        if (!comma)
+        if (!delim)
             break;
-        p = comma + 1;
+        p = delim + 1;
     }
     return meta->run[0] && meta->session[0] && meta->content[0] && meta->id[0] ? 1 : 0;
+}
+
+static inline int sl_session_meta_parse_extra(const char *extra, sl_session_meta_t *meta) {
+    return sl_session_meta_parse_kv_list(extra, ',', meta);
 }
 
 /* 生成 meta 命令参数字段；返回写入长度，cap 不足时返回 0。 */

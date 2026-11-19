@@ -31,6 +31,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -44,6 +45,18 @@ std::mutex g_writeMutex;
 std::atomic<bool> g_quit{false};
 /* 当前文件代次。P0：所有事件都带它，兼容层可丢弃旧文件的迟到事件。 */
 std::atomic<std::uint64_t> g_fileGeneration{0};
+/* D27：按 generation 保存 debug session。meta 先于 open 到达；
+ * watchdog 回放同一 open 时复用已保存的 meta。 */
+std::mutex g_sessionMetaMutex;
+std::map<std::uint64_t, sl_session_meta_t> g_sessionMeta;
+
+static std::string sessionLogPrefix(std::uint64_t gen) {
+    std::lock_guard<std::mutex> lock(g_sessionMetaMutex);
+    auto it = g_sessionMeta.find(gen);
+    if (it == g_sessionMeta.end() || !it->second.run[0] || !it->second.session[0])
+        return "run=- session=-";
+    return std::string("run=") + it->second.run + " session=" + it->second.session;
+}
 
 static long long lifecycleNowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -51,13 +64,46 @@ static long long lifecycleNowMs() {
         .count();
 }
 
+static void lifecycleLogV(std::uint64_t gen, const char* fmt, va_list args) {
+    std::string prefix = sessionLogPrefix(gen);
+    fprintf(stderr, "[daemon][life] %lld %s ", lifecycleNowMs(), prefix.c_str());
+    vfprintf(stderr, fmt, args);
+    fputc('\n', stderr);
+}
+
 static void lifecycleLog(const char* fmt, ...) {
     va_list args;
     va_start(args, fmt);
-    fprintf(stderr, "[daemon][life] %lld ", lifecycleNowMs());
+    lifecycleLogV(g_fileGeneration.load(), fmt, args);
+    va_end(args);
+}
+
+static void lifecycleLogFor(std::uint64_t gen, const char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    lifecycleLogV(gen, fmt, args);
+    va_end(args);
+}
+
+static void daemonLogV(const char* fmt, va_list args) {
+    std::string prefix = sessionLogPrefix(g_fileGeneration.load());
+    fprintf(stderr, "[daemon] %s ", prefix.c_str());
     vfprintf(stderr, fmt, args);
     fputc('\n', stderr);
+}
+
+static void daemonLog(const char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    daemonLogV(fmt, args);
     va_end(args);
+}
+
+static void storeSessionMeta(std::uint64_t gen, const sl_session_meta_t& meta) {
+    std::lock_guard<std::mutex> lock(g_sessionMetaMutex);
+    g_sessionMeta[gen] = meta;
+    while (g_sessionMeta.size() > 8)
+        g_sessionMeta.erase(g_sessionMeta.begin());
 }
 
 /* PR_SET_PDEATHSIG 是「父线程死亡」语义；handler 只置 sig_atomic_t 标志。
@@ -175,12 +221,12 @@ bool checkParentDeath() {
     if (!g_parentDeathSignal) return false;
     g_parentDeathSignal = 0;
     if (g_expectedParentPid > 0 && getppid() == g_expectedParentPid) {
-        fprintf(stderr, "[daemon] 忽略 PDEATHSIG：父线程退出但父进程仍在(pid=%d)\n",
-                (int)g_expectedParentPid);
+        daemonLog("忽略 PDEATHSIG：父线程退出但父进程仍在(pid=%d)",
+                  (int)g_expectedParentPid);
         return false;
     }
-    fprintf(stderr, "[daemon] 父进程已退出(expected=%d current=%d)，优雅退出\n",
-            (int)g_expectedParentPid, (int)getppid());
+    daemonLog("父进程已退出(expected=%d current=%d)，优雅退出",
+              (int)g_expectedParentPid, (int)getppid());
     g_quit.store(true);
     return true;
 }
@@ -192,14 +238,14 @@ std::uint64_t parseUnsigned(const std::string& s) {
 /* 旧文件命令不得影响当前播放代次。open 自己负责建立新代次，不走这里。 */
 bool commandGenerationMatches(const std::vector<std::string>& f) {
     if (f.size() < 3) {
-        fprintf(stderr, "[daemon] 命令缺少 P0 帧信封: %s\n", f[0].c_str());
+        daemonLog("命令缺少 P0 帧信封: %s", f[0].c_str());
         return false;
     }
     std::uint64_t gen = parseUnsigned(f[1]);
     if (gen != g_fileGeneration.load()) {
-        fprintf(stderr, "[daemon] 丢弃过期代次命令: cmd=%s gen=%llu current=%llu\n",
-                f[0].c_str(), (unsigned long long)gen,
-                (unsigned long long)g_fileGeneration.load());
+        daemonLog("丢弃过期代次命令: cmd=%s gen=%llu current=%llu",
+                  f[0].c_str(), (unsigned long long)gen,
+                  (unsigned long long)g_fileGeneration.load());
         return false;
     }
     return true;
@@ -234,25 +280,25 @@ int main(int argc, char** argv) {
 
     g_listenFd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (g_listenFd < 0) {
-        fprintf(stderr, "[daemon] socket 失败: %s\n", strerror(errno));
+        daemonLog("socket 失败: %s", strerror(errno));
         return 1;
     }
     sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
     if (strlen(path) >= sizeof(addr.sun_path)) {
-        fprintf(stderr, "[daemon] socket 路径过长\n");
+        daemonLog("socket 路径过长");
         return 1;
     }
     strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
     if (bind(g_listenFd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-        fprintf(stderr, "[daemon] bind 失败: %s\n", strerror(errno));
+        daemonLog("bind 失败: %s", strerror(errno));
         return 1;
     }
     if (listen(g_listenFd, 1) < 0) {
-        fprintf(stderr, "[daemon] listen 失败: %s\n", strerror(errno));
+        daemonLog("listen 失败: %s", strerror(errno));
         return 1;
     }
-    fprintf(stderr, "[daemon] listening on %s\n", path);
+    daemonLog("listening on %s", path);
 
     /* 等待兼容层连接。带超时，避免父进程启动失败时子进程永久挂着占 VPU。 */
     /* 15s 总超时；200ms 轮询一次父进程死亡信号，满足「父进程死后 <1s 退出」。 */
@@ -270,12 +316,12 @@ int main(int argc, char** argv) {
         g_clientFd = -1;
     }
     if (g_clientFd < 0) {
-        fprintf(stderr, "[daemon] accept 失败/超时/父进程退出: %s\n", strerror(errno));
+        daemonLog("accept 失败/超时/父进程退出: %s", strerror(errno));
         close(g_listenFd);
         unlink(path);
         return 0;
     }
-    fprintf(stderr, "[daemon] client connected\n");
+    daemonLog("client connected");
 
     /* ---- SlPlayer 实例 ---- */
     sl::Player player;
@@ -349,13 +395,37 @@ int main(int argc, char** argv) {
             lifecycleLog("control disconnect opened=%d gen=%llu",
                          opened ? 1 : 0,
                          (unsigned long long)g_fileGeneration.load());
-            fprintf(stderr, "[daemon] 控制连接断开，退出\n");
+            daemonLog("控制连接断开，退出");
             break;
         }
         if (rr == 0) continue; /* 超时：回到循环头检查 g_quit */
         std::vector<std::string> f = splitFields(payload);
         if (f.empty()) continue;
         const std::string& cmd = f[0];
+
+        if (cmd == SL_CMD_META) {
+            /* meta<TAB>gen<TAB>req<TAB>run=<id><TAB>session=<id><TAB>content=<type><TAB>id=<primary> */
+            if (f.size() < 7) {
+                daemonLog("bad meta command");
+                continue;
+            }
+            std::uint64_t gen = parseUnsigned(f[1]);
+            std::string kv;
+            for (size_t i = 3; i < f.size(); ++i) {
+                if (i > 3) kv += SL_IPC_FIELD_SEP;
+                kv += f[i];
+            }
+            sl_session_meta_t meta;
+            int rc = sl_session_meta_parse_kv_list(kv.c_str(), SL_IPC_FIELD_SEP, &meta);
+            if (rc != 1) {
+                lifecycleLogFor(gen, "bad meta fields rc=%d", rc);
+                continue;
+            }
+            storeSessionMeta(gen, meta);
+            lifecycleLogFor(gen, "meta ok run=%s session=%s content=%s id=%s",
+                            meta.run, meta.session, meta.content, meta.id);
+            continue;
+        }
 
         if (cmd == SL_CMD_OPEN) {
             /* open<gen><req><videoUrl><referrer><start><end><audioUrls...> */
@@ -367,9 +437,8 @@ int main(int argc, char** argv) {
             std::uint64_t requestId = parseUnsigned(f[2]);
             g_fileGeneration.store(fileGen);
             std::lock_guard<std::mutex> lock(playerMutex);
-            lifecycleLog("open enter gen=%llu req=%llu opened=%d",
-                         (unsigned long long)fileGen,
-                         (unsigned long long)requestId, opened ? 1 : 0);
+            lifecycleLogFor(fileGen, "open enter req=%llu opened=%d",
+                            (unsigned long long)requestId, opened ? 1 : 0);
             if (opened) player.stop();
             lifecycleLog("open old player stopped");
             sl::SourceSpec spec;
@@ -381,9 +450,8 @@ int main(int argc, char** argv) {
                 if (!f[i].empty()) spec.audioUrls.push_back(f[i]);
             }
             lastProgressMs.store(0);
-            fprintf(stderr, "[daemon] open gen=%llu req=%llu: %s (audio %zu)\n",
-                    (unsigned long long)fileGen, (unsigned long long)requestId,
-                    spec.videoUrl.c_str(), spec.audioUrls.size());
+            lifecycleLogFor(fileGen, "open req=%llu (audio %zu)",
+                            (unsigned long long)requestId, spec.audioUrls.size());
             if (!player.open(spec)) {
                 lifecycleLog("open failed gen=%llu req=%llu",
                              (unsigned long long)fileGen,
@@ -431,14 +499,14 @@ int main(int argc, char** argv) {
                      hb.workerAlive ? 1 : 0);
             emitContext(SL_EVT_HEARTBEAT, parseUnsigned(f[2]), args);
         } else if (cmd == SL_CMD_QUIT) {
-            fprintf(stderr, "[daemon] quit 命令\n");
+            daemonLog("quit 命令");
             break;
         } else {
-            fprintf(stderr, "[daemon] 未知命令: %s\n", cmd.c_str());
+            daemonLog("未知命令: %s", cmd.c_str());
         }
     }
 
-    fprintf(stderr, "[daemon] shutdown\n");
+    daemonLog("shutdown");
     {
         std::lock_guard<std::mutex> lock(playerMutex);
         if (opened) {
@@ -450,6 +518,6 @@ int main(int argc, char** argv) {
     if (g_clientFd >= 0) close(g_clientFd);
     if (g_listenFd >= 0) close(g_listenFd);
     unlink(path);
-    fprintf(stderr, "[daemon] exited\n");
+    daemonLog("exited");
     return 0;
 }

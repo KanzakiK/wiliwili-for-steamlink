@@ -4,7 +4,9 @@
  * 连到 slplayer_daemon，发送 open（播放本地 mp4），打印收到的事件，
  * 若干秒后发 quit。用来在不开 wiliwili UI 的情况下验证 IPC 控制面/事件面。
  *
- * 用法: ipc_probe [socket路径] [视频路径] [运行秒数]
+ * 用法:
+ *   ipc_probe [socket路径] [视频路径] [运行秒数]
+ *   ipc_probe --meta-only [socket路径]
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,6 +54,32 @@ static int recv_payload(int fd, char *buf, size_t cap) {
 
 int main(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
+    if (argc > 1 && strcmp(argv[1], "--meta-only") == 0) {
+        const char *sock = argc > 2 ? argv[2] : SL_IPC_DEFAULT_SOCKET;
+        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        struct sockaddr_un addr;
+        memset(&addr, 0, sizeof(addr));
+        addr.sun_family = AF_UNIX;
+        strncpy(addr.sun_path, sock, sizeof(addr.sun_path) - 1);
+        if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+            fprintf(stderr, "connect %s failed: %s\n", sock, strerror(errno));
+            return 1;
+        }
+        char meta[512];
+        snprintf(meta, sizeof(meta),
+                 "%s\t1\t1\t%s=meta-probe\t%s=meta-probe-1\t%s=video\t%s=BVTEST",
+                 SL_CMD_META, SL_META_RUN_KEY, SL_META_SESSION_KEY,
+                 SL_META_CONTENT_KEY, SL_META_ID_KEY);
+        send_payload(fd, meta);
+        printf("sent: %s\n", meta);
+        usleep(200000);
+        char quit[128];
+        snprintf(quit, sizeof(quit), "%s\t1\t2", SL_CMD_QUIT);
+        send_payload(fd, quit);
+        printf("sent quit\n");
+        close(fd);
+        return 0;
+    }
     const char *sock = argc > 1 ? argv[1] : SL_IPC_DEFAULT_SOCKET;
     const char *video = argc > 2 ? argv[2] : "/tmp/slplayer/dash_480p_30s.mp4";
     int seconds = argc > 3 ? atoi(argv[3]) : 8;
