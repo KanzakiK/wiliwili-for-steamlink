@@ -81,6 +81,23 @@ else
     pass "统一日志未发现签名 URL 参数"
 fi
 
+HEALTH_FORCE=$(sed -n 's/^health_force=//p' "$RUN_DIR/manifest.txt" 2>/dev/null | head -1)
+if [ "$HEALTH_FORCE" = "1" ]; then
+    check_pattern wiliwili.log "[mpv-compat][health]" "compat 软卡顿检测"
+    check_pattern wiliwili.log "[UI][health]" "播放页健康提示"
+    HEALTH_LINES=$(grep -c -F '[mpv-compat][health]' "$RUN_DIR/wiliwili.log" 2>/dev/null || true)
+    if [ "$HEALTH_LINES" -eq 1 ]; then
+        pass "软卡顿提示每个 run 只发生一次"
+    else
+        fail "软卡顿提示次数=$HEALTH_LINES，期望 1"
+    fi
+    if grep -E "watchdog 判定卡死|END_FILE\(ERROR\)" "$RUN_DIR/wiliwili.log" >/dev/null 2>&1; then
+        fail "软卡顿提示不应触发 watchdog 或 ERROR"
+    else
+        pass "软卡顿提示未触发 watchdog/ERROR"
+    fi
+fi
+
 if [ "$FAILURES" -eq 0 ]; then
     echo "RESULT: PASS $RUN_DIR"
     exit 0

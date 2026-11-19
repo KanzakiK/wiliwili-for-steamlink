@@ -90,6 +90,11 @@ struct Heartbeat {
     /* 播放工作线程仍在运行；IPC 主循环存活不等于这一项为 true。 */
     bool workerAlive = false;
     int videoFrames = 0;
+    /* D22 软卡顿判据：呈现位置、VPU 队列和最近网络错误的年龄。 */
+    double presentationMs = 0.0;
+    unsigned videoQueueMs = 0;
+    /* INT64_MAX 表示未记录网络错误；否则为距最近一次重试/失败的墙钟毫秒。 */
+    std::int64_t networkErrorAgeMs = INT64_MAX;
 };
 
 struct Stats {

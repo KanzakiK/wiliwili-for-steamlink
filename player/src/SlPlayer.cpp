@@ -350,6 +350,15 @@ struct Player::Impl {
         hb.lastFrameTimeMs = lastFrameTimeMs_.load();
         hb.stage = stage_.load();
         hb.videoFrames = videoFrames_.load();
+        hb.presentationMs = position_.load() * 1000.0;
+        hb.videoQueueMs = videoQueueMs_.load();
+        const std::int64_t videoErrorMs = videoSource_.lastNetworkErrorMs();
+        const std::int64_t audioErrorMs = audioSource_.lastNetworkErrorMs();
+        const std::int64_t latestErrorMs = (std::max)(videoErrorMs, audioErrorMs);
+        hb.networkErrorAgeMs = latestErrorMs > 0
+                                   ? (std::max<std::int64_t>(
+                                         0, steadyNowMs() - latestErrorMs))
+                                   : INT64_MAX;
         hb.workerAlive = running_.load();
         hb.currentPaused = paused_.load();
         hb.targetPaused = targetPaused_.load();

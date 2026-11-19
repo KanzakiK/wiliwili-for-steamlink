@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <clocale>
 #include <cmath>
+#include <cstdio>
 #include <pystring.h>
 #include <borealis/core/thread.hpp>
 #include <borealis/core/application.hpp>
@@ -417,6 +418,8 @@ void MPVCore::init() {
     check_error(mpvObserveProperty(mpv, 19, "saturation", MPV_FORMAT_DOUBLE));
     check_error(mpvObserveProperty(mpv, 20, "gamma", MPV_FORMAT_DOUBLE));
     check_error(mpvObserveProperty(mpv, 21, "hue", MPV_FORMAT_DOUBLE));
+    /* D22：compat 侧软卡顿只发一次这个 flag，UI 用现有 HINT 显示提示。 */
+    check_error(mpvObserveProperty(mpv, 22, "sl-health-stall", MPV_FORMAT_FLAG));
 
     // init renderer params
 #ifdef MPV_SW_RENDER
@@ -1141,6 +1144,15 @@ void MPVCore::eventMainLoop() {
                         break;
                     case 21:
                         if (data) video_hue = *(double *)data;
+                        break;
+                    case 22:
+                        if (data) {
+                            static const char* hint = "播放不流畅，可尝试切换到 720P";
+                            const char* runId = getenv("SL_DEBUG_RUN_ID");
+                            fprintf(stderr, "[UI][health] run=%s hint shown\n",
+                                    runId ? runId : "-");
+                            APP_E->fire("HINT", (void*)hint);
+                        }
                         break;
                     default:
                         break;

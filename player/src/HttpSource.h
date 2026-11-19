@@ -6,6 +6,7 @@
  */
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -48,6 +49,7 @@ public:
     long contentLength() const;
     int64_t readPosition() const;
     int64_t baseOffset() const;
+    int64_t lastNetworkErrorMs() const { return lastNetworkErrorMs_.load(); }
 
 private:
     class Downloader;
@@ -67,6 +69,7 @@ private:
     std::string error_;
     int videoIndex_ = -1;
     int audioIndex_ = -1;
+    std::atomic<int64_t> lastNetworkErrorMs_{0};
 };
 
 } // namespace sl

@@ -33,6 +33,11 @@ bool isRemoteUrl(const std::string& url) {
     return url.compare(0, 7, "http://") == 0 || url.compare(0, 8, "https://") == 0;
 }
 
+std::int64_t steadyNowMs() {
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
 std::string localPath(const std::string& url) {
     const std::string prefix = "file://";
     if (url.compare(0, prefix.size(), prefix) == 0)
@@ -46,9 +51,11 @@ std::string localPath(const std::string& url) {
 
 class HttpSource::Downloader {
 public:
-    Downloader(std::string url, std::string referrer, std::string userAgent)
+    Downloader(std::string url, std::string referrer, std::string userAgent,
+               std::atomic<int64_t>* errorClock)
         : url_(std::move(url)), referrer_(std::move(referrer)),
           userAgent_(std::move(userAgent)),
+          errorClock_(errorClock),
           debug_(std::getenv("SL_HTTP_DEBUG") != nullptr) {}
 
     ~Downloader() { join(); }
@@ -280,6 +287,8 @@ private:
             CURL* curl = curl_easy_init();
             if (!curl) {
                 std::lock_guard<std::mutex> lock(mutex_);
+                if (errorClock_)
+                    errorClock_->store(steadyNowMs(), std::memory_order_relaxed);
                 error_ = true;
                 errorMessage_ = "curl init failed";
                 eof_ = true;
@@ -348,11 +357,15 @@ private:
                             "[SlHttp] 传输中断: %s / HTTP %ld，从 %lld 续传 %d/%d\n",
                             curl_easy_strerror(result), httpStatus,
                             (long long)endOffset_, attempt + 1, kDownloadMaxRetries);
+                    if (errorClock_)
+                        errorClock_->store(steadyNowMs(), std::memory_order_relaxed);
                     error_ = false;
                     eof_ = false;
                     cond_.notify_all();
                     shouldRetry = true;
                 } else {
+                    if (errorClock_)
+                        errorClock_->store(steadyNowMs(), std::memory_order_relaxed);
                     if (result != CURLE_OK) {
                         fprintf(stderr, "[SlHttp] 下载失败: %s\n",
                                 curl_easy_strerror(result));
@@ -446,6 +459,7 @@ private:
     std::string referrer_;
     std::string userAgent_;
     std::string errorMessage_;
+    std::atomic<int64_t>* errorClock_ = nullptr;
 
     mutable std::mutex mutex_;
     std::condition_variable cond_;
@@ -476,6 +490,7 @@ bool HttpSource::open(const std::string& url, const std::string& referrer,
                       const std::string& userAgent) {
     close();
     error_.clear();
+    lastNetworkErrorMs_.store(0, std::memory_order_relaxed);
     videoIndex_ = -1;
     audioIndex_ = -1;
     remote_ = isRemoteUrl(url);
@@ -485,7 +500,8 @@ bool HttpSource::open(const std::string& url, const std::string& referrer,
 
     int ret;
     if (remote_) {
-        auto downloader = std::make_shared<Downloader>(url, referrer, userAgent);
+        auto downloader = std::make_shared<Downloader>(url, referrer, userAgent,
+                                                       &lastNetworkErrorMs_);
         downloader->start();
         {
             std::lock_guard<std::mutex> lock(downloaderMutex_);

@@ -489,14 +489,15 @@ int main(int argc, char** argv) {
         } else if (cmd == SL_CMD_HEARTBEAT) {
             if (!commandGenerationMatches(f)) continue;
             sl::Heartbeat hb = player.heartbeat();
-            char args[320];
+            char args[400];
             snprintf(args, sizeof(args),
-                     "%lld\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d",
+                     "%lld\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%.3f\t%u\t%lld",
                      (long long)hb.lastFrameTimeMs, hb.stage,
                      hb.playing ? 1 : 0, hb.inTransition ? 1 : 0,
                      hb.videoFrames, hb.currentPaused ? 1 : 0,
                      hb.targetPaused ? 1 : 0, hb.seeking ? 1 : 0,
-                     hb.workerAlive ? 1 : 0);
+                     hb.workerAlive ? 1 : 0, hb.presentationMs, hb.videoQueueMs,
+                     (long long)hb.networkErrorAgeMs);
             emitContext(SL_EVT_HEARTBEAT, parseUnsigned(f[2]), args);
         } else if (cmd == SL_CMD_QUIT) {
             daemonLog("quit 命令");

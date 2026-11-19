@@ -79,6 +79,10 @@ static int g_propDebug = 0;
 #define WATCHDOG_STALL_MS_DEFAULT 1500
 #define WATCHDOG_NOHB_MS_DEFAULT 3000
 #define WATCHDOG_GRACE_MS_DEFAULT 2000
+#define HEALTH_WINDOW_MS_DEFAULT 8000
+#define HEALTH_PROGRESS_MS_DEFAULT 250
+#define HEALTH_NET_GRACE_MS_DEFAULT 3000
+#define SL_HEALTH_PROP "sl-health-stall"
 #define DAEMON_RESTART_MAX 3
 #define DAEMON_RESTART_WINDOW_MS 30000
 /* 故障恢复可快速补杀；正常退出要给 daemon 完成 stop→FreeStream→FreeContext 的时间。 */
@@ -136,6 +140,19 @@ struct mpv_handle {
     int hbTargetPaused;
     int hbSeeking;
     int hbValid;
+    double hbPresentationMs;
+    unsigned hbVideoQueueMs;
+    long long hbNetworkErrorAgeMs;
+    int hbHealthValid;
+    uint64_t hbRequestId;
+
+    /* D22 软卡顿状态：按文件 generation 重置，每个实例至多提示一次。 */
+    uint64_t healthGeneration;
+    int healthHintShown;
+    int healthBaselineValid;
+    long long healthBaselineMs;
+    double healthBaselinePresentationMs;
+    int healthBaselineFrames;
 
     pthread_t watchdogThread;
     int watchdogRunning;
@@ -482,6 +499,15 @@ static long long envMs(const char *name, long long fallback, long long minMs, lo
     return v;
 }
 
+/* D22：软卡顿只向 UI 发一次性提示，不触发 watchdog/透明层/END_FILE。 */
+static void fire_health_hint(mpv_handle *ctx) {
+    int *flag = malloc(sizeof(int));
+    if (!flag) return;
+    *flag = 1;
+    push_prop_event(ctx, SL_HEALTH_PROP, 0, MPV_FORMAT_FLAG, flag);
+    fire_wakeup(ctx);
+}
+
 static const char *signalName(int sig) {
     switch (sig) {
     case SIGKILL: return "SIGKILL";
@@ -672,6 +698,13 @@ static int start_daemon_process(mpv_handle *ctx, const char *reason) {
     ctx->hbTargetPaused = 0;
     ctx->hbSeeking = 0;
     ctx->hbValid = 0;
+    ctx->hbPresentationMs = 0;
+    ctx->hbVideoQueueMs = 0;
+    ctx->hbNetworkErrorAgeMs = 0;
+    ctx->hbHealthValid = 0;
+    ctx->healthGeneration = UINT64_MAX;
+    ctx->healthHintShown = 0;
+    ctx->healthBaselineValid = 0;
 
     int fd = connect_daemon_socket(ctx);
     if (fd < 0) {
@@ -774,6 +807,13 @@ static void *watchdog_thread(void *arg) {
     long long stallMs = envMs("SL_WATCHDOG_STALL_MS", WATCHDOG_STALL_MS_DEFAULT, 500, 30000);
     long long noHbMs = envMs("SL_WATCHDOG_NOHB_MS", WATCHDOG_NOHB_MS_DEFAULT, 1000, 60000);
     long long graceMs = envMs("SL_WATCHDOG_GRACE_MS", WATCHDOG_GRACE_MS_DEFAULT, 0, 10000);
+    long long healthWindowMs = envMs("SL_HEALTH_WINDOW_MS", HEALTH_WINDOW_MS_DEFAULT,
+                                     1000, 60000);
+    long long healthProgressMs = envMs("SL_HEALTH_PROGRESS_MS", HEALTH_PROGRESS_MS_DEFAULT,
+                                       1, 10000);
+    long long healthNetGraceMs = envMs("SL_HEALTH_NET_GRACE_MS", HEALTH_NET_GRACE_MS_DEFAULT,
+                                       0, 30000);
+    int healthForce = getenv("SL_HEALTH_FORCE") && strcmp(getenv("SL_HEALTH_FORCE"), "1") == 0;
     const char *disable = getenv("SL_WATCHDOG_DISABLE");
     if (disable && strcmp(disable, "1") == 0) {
         fprintf(stderr, "[mpv-compat] watchdog 已由 SL_WATCHDOG_DISABLE=1 关闭\n");
@@ -782,12 +822,16 @@ static void *watchdog_thread(void *arg) {
     fprintf(stderr,
             "[mpv-compat] watchdog 启动: poll=%lldms stall=%lldms nohb=%lldms grace=%lldms\n",
             pollMs, stallMs, noHbMs, graceMs);
+    fprintf(stderr,
+            "[mpv-compat] health 启动: window=%lldms progress=%lldms net_grace=%lldms force=%d\n",
+            healthWindowMs, healthProgressMs, healthNetGraceMs, healthForce ? 1 : 0);
 
     while (1) {
         pthread_mutex_lock(&ctx->daemonMutex);
         int running = ctx->watchdogRunning && !ctx->shuttingDown;
         int active = ctx->playbackActive;
         int gen = ctx->daemonGeneration;
+        uint64_t fileGen = 0;
         int hasDaemon = ctx->daemonPid > 0 && ctx->sock >= 0;
         pthread_mutex_unlock(&ctx->daemonMutex);
         if (!running) break;
@@ -800,9 +844,16 @@ static void *watchdog_thread(void *arg) {
             long long hbAge = 0, frameAge = -1, resumeAge = 0;
             int playing = 0, inTransition = 1, expPause = 1, pid = 0, curGen = 0;
             int workerAlive = 1, hbValid = 0;
+            int hbHealthValid = 0;
+            int hbVideoFrames = 0;
+            double hbPresentationMs = 0.0;
+            unsigned hbQueueMs = 0;
+            long long hbNetErrorAgeMs = 0;
+            uint64_t hbRequestId = 0;
             pthread_mutex_lock(&ctx->daemonMutex);
             if (ctx->watchdogRunning && !ctx->shuttingDown &&
                 ctx->daemonGeneration == gen && ctx->daemonPid > 0) {
+                fileGen = ctx->fileGeneration;
                 curGen = ctx->daemonGeneration;
                 pid = (int)ctx->daemonPid;
                 hbAge = now - ctx->heartbeatReceivedMs;
@@ -814,14 +865,28 @@ static void *watchdog_thread(void *arg) {
                 expPause = ctx->expectedPause;
                 workerAlive = ctx->hbWorkerAlive;
                 hbValid = ctx->hbValid;
+                hbHealthValid = ctx->hbHealthValid;
+                hbVideoFrames = ctx->hbVideoFrames;
+                hbPresentationMs = ctx->hbPresentationMs;
+                hbQueueMs = ctx->hbVideoQueueMs;
+                hbNetErrorAgeMs = ctx->hbNetworkErrorAgeMs;
+                hbRequestId = ctx->hbRequestId;
+                if (ctx->healthGeneration != fileGen) {
+                    ctx->healthGeneration = fileGen;
+                    ctx->healthHintShown = 0;
+                    ctx->healthBaselineValid = 0;
+                }
             }
             pthread_mutex_unlock(&ctx->daemonMutex);
 
+            int noHeartbeat = 0;
+            int workerDead = 0;
+            int stalled = 0;
             if (curGen == gen && pid > 0) {
-                int noHeartbeat = hbAge > noHbMs;
-                int workerDead = hbValid && !workerAlive;
-                int stalled = frameAge > stallMs && playing && !inTransition &&
-                              !expPause && resumeAge > graceMs;
+                noHeartbeat = hbAge > noHbMs;
+                workerDead = hbValid && !workerAlive;
+                stalled = frameAge > stallMs && playing && !inTransition &&
+                          !expPause && resumeAge > graceMs;
                 if (noHeartbeat || workerDead || stalled) {
                     pthread_mutex_lock(&ctx->daemonMutex);
                     if (ctx->daemonGeneration == gen && ctx->daemonPid > 0 &&
@@ -839,6 +904,51 @@ static void *watchdog_thread(void *arg) {
                     }
                     pthread_mutex_unlock(&ctx->daemonMutex);
                 }
+            }
+
+            /* D22：硬故障已由 watchdog 处理；软卡顿只提示一次，不动播放状态。 */
+            int hardAction = noHeartbeat || workerDead || stalled;
+            int healthEligible = !hardAction && curGen == gen && pid > 0 &&
+                                 hbValid && hbHealthValid && workerAlive &&
+                                 playing && !inTransition && !expPause &&
+                                 resumeAge > graceMs && frameAge >= 0 &&
+                                 frameAge < stallMs && hbVideoFrames > 0;
+            if (healthEligible && hbNetErrorAgeMs >= 0 &&
+                hbNetErrorAgeMs < healthNetGraceMs)
+                healthEligible = 0;
+            if (healthEligible) {
+                if (!ctx->healthBaselineValid) {
+                    ctx->healthBaselineValid = 1;
+                    ctx->healthBaselineMs = now;
+                    ctx->healthBaselinePresentationMs = hbPresentationMs;
+                    ctx->healthBaselineFrames = hbVideoFrames;
+                } else if (hbPresentationMs >=
+                           ctx->healthBaselinePresentationMs + (double)healthProgressMs) {
+                    ctx->healthBaselineMs = now;
+                    ctx->healthBaselinePresentationMs = hbPresentationMs;
+                    ctx->healthBaselineFrames = hbVideoFrames;
+                } else if (!ctx->healthHintShown && hbVideoFrames > ctx->healthBaselineFrames &&
+                           (now - ctx->healthBaselineMs >= healthWindowMs || healthForce)) {
+                    char run[SL_META_FIELD_MAX] = {0};
+                    char session[SL_META_FIELD_MAX] = {0};
+                    pthread_mutex_lock(&ctx->daemonMutex);
+                    snprintf(run, sizeof(run), "%s", ctx->sessionMeta.run);
+                    snprintf(session, sizeof(session), "%s", ctx->sessionMeta.session);
+                    pthread_mutex_unlock(&ctx->daemonMutex);
+                    fprintf(stderr,
+                            "[mpv-compat][health] run=%s session=%s gen=%llu "
+                            "req=%llu stall detected: present=%.0f base=%.0f queue=%u frames=%d "
+                            "frame_age=%lld net_age=%lld force=%d -> hint shown\n",
+                            run, session, (unsigned long long)fileGen,
+                            (unsigned long long)hbRequestId,
+                            hbPresentationMs, ctx->healthBaselinePresentationMs,
+                            hbQueueMs, hbVideoFrames, frameAge,
+                            hbNetErrorAgeMs, healthForce ? 1 : 0);
+                    ctx->healthHintShown = 1;
+                    fire_health_hint(ctx);
+                }
+            } else {
+                ctx->healthBaselineValid = 0;
             }
         } else {
             usleep((useconds_t)(pollMs * 1000));
@@ -926,7 +1036,7 @@ static void *rx_thread(void *arg) {
             if (recover_daemon_connection(ctx) < 0) break;
             continue;
         }
-        char *fields[16];
+        char *fields[16] = {0};
         int nf = split_fields(buf, fields, 16);
         if (nf < SL_IPC_FRAME_ARGS_FIELD) continue;
         const char *evt = fields[0];
@@ -1092,6 +1202,12 @@ static void *rx_thread(void *arg) {
                 ctx->hbTargetPaused = atoi(fields[9]) ? 1 : 0;
                 ctx->hbSeeking = atoi(fields[10]) ? 1 : 0;
                 ctx->hbWorkerAlive = atoi(fields[11]) ? 1 : 0;
+                ctx->hbPresentationMs = nf >= 13 ? atof(fields[12]) : 0.0;
+                ctx->hbVideoQueueMs = nf >= 14 ? (unsigned)strtoul(fields[13], NULL, 10) : 0;
+                ctx->hbNetworkErrorAgeMs =
+                    nf >= 15 ? strtoll(fields[14], NULL, 10) : 0;
+                ctx->hbHealthValid = nf >= 15 ? 1 : 0;
+                ctx->hbRequestId = evtReq;
                 ctx->hbValid = 1;
                 ctx->heartbeatReceivedMs = monotonicMs();
                 pthread_mutex_unlock(&ctx->daemonMutex);
