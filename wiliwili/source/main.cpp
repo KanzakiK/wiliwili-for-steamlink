@@ -207,14 +207,38 @@ int main(int argc, char* argv[]) {
                 d27ExpectPlaying(scene, timeout * 5,
                                  [scene]() { d27Log("CMD", scene, "status=ok"); });
             } else if (scene == "seek_forward" || scene == "seek_backward") {
-                double value = atof(d27Arg(args, "target").c_str());
-                if (value <= 0) value = atof(d27Arg(args, "delta").c_str());
-                d27ExpectPlaying(scene, timeout * 5, [scene, value, timeout]() {
-                    if (scene == "seek_forward")
-                        MPVCore::instance().seek((int64_t)value);
-                    else
-                        MPVCore::instance().seekRelative(-(int64_t)value);
-                    d27ExpectPosition(scene, value, timeout * 5);
+                std::string targetText = d27Arg(args, "target");
+                std::string deltaText = d27Arg(args, "delta");
+                if (targetText.empty() && deltaText.empty()) {
+                    d27Log("CMD", scene, "status=error missing_target_or_delta");
+                    return EXIT_FAILURE;
+                }
+                double target = atof(targetText.c_str());
+                double delta = atof(deltaText.c_str());
+                bool useTarget = !targetText.empty();
+                d27ExpectPlaying(scene, timeout * 5,
+                                 [scene, target, delta, useTarget, timeout]() {
+                    double expected = target;
+                    if (useTarget) {
+                        char detail[128];
+                        snprintf(detail, sizeof(detail),
+                                 "mode=target target=%.3f status=sent", target);
+                        d27Log("CMD", scene, detail);
+                        MPVCore::instance().seek((int64_t)target);
+                    } else {
+                        double current = MPVCore::instance().playback_time;
+                        double signedDelta =
+                            scene == "seek_forward" ? delta : -delta;
+                        expected = current + signedDelta;
+                        if (expected < 0) expected = 0;
+                        char detail[192];
+                        snprintf(detail, sizeof(detail),
+                                 "mode=delta delta=%.3f current=%.3f expected=%.3f status=sent",
+                                 delta, current, expected);
+                        d27Log("CMD", scene, detail);
+                        MPVCore::instance().seekRelative((int64_t)signedDelta);
+                    }
+                    d27ExpectPosition(scene, expected, timeout * 5);
                 });
             } else if (scene == "pause_resume") {
                 int after = atoi(d27Arg(args, "after").c_str());

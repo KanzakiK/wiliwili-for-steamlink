@@ -169,6 +169,14 @@ else
                 seek_forward|seek_backward)
                     check_both wiliwili.log "$PREFIX" "seek mode=" "CMD seek"
                     check_both wiliwili.log "$PREFIX" "seeked" "EVT seeked"
+                    SCENE_ARGS=$(sed -n 's/^args=//p' "$RUN_DIR/manifest.txt" 2>/dev/null | head -1)
+                    if printf '%s' "$SCENE_ARGS" | grep -q 'target='; then
+                        check_both wiliwili.log "$PREFIX" "scene=$SCENE mode=target" "seek target mode"
+                    elif printf '%s' "$SCENE_ARGS" | grep -q 'delta='; then
+                        check_both wiliwili.log "$PREFIX" "scene=$SCENE mode=delta" "seek delta mode"
+                    else
+                        fail "seek 场景缺少 target 或 delta"
+                    fi
                     ;;
                 pause_resume)
                     check_both wiliwili.log "$PREFIX" "set pause=" "CMD pause/resume"
@@ -184,6 +192,10 @@ else
         page_nav|none)
             check_pattern wiliwili.log "][UI]$PREFIX[gen=-][req=-] content start content=page" "page content start"
             check_pattern wiliwili.log "][UI]$PREFIX[gen=-][req=-] content end reason=user_stop" "page content end"
+            PAGE_CONTENT=$(sed -n 's/^content=//p' "$RUN_DIR/manifest.txt" 2>/dev/null | head -1)
+            if [ -n "$PAGE_CONTENT" ]; then
+                check_both wiliwili.log "$PREFIX" "content start content=page id=$PAGE_CONTENT" "page 目标与 manifest 一致"
+            fi
             ;;
         *)
             pass "scene=$SCENE 暂无额外内容契约"
