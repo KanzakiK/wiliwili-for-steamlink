@@ -43,7 +43,7 @@ public:
     void setPaused(bool paused);
     /* 非阻塞请求：立即阻断旧音频提交，实际 demux seek / flush / 重建由音频线程完成。 */
     void requestSeek(double targetSeconds);
-    void scheduleStart(int delayMs, int skipMs);
+    void scheduleStart(double delayMs, double skipMs);
     void setVolume(int volume);
 
     bool started() const { return startedFlag_; }
@@ -66,8 +66,8 @@ private:
     bool ensureStream();
     void writeFrame(void* output, const uint8_t* data, int size) const;
     int queueTarget() const;
-    void applyStartLocked(int delayMs, int skipMs);
-    void applyStartAtLocked(double atSeconds, int skipMs);
+    void applyStartLocked(double delayMs, double skipMs);
+    void applyStartAtLocked(double atSeconds, double skipMs);
 
     CSLAudioContext* context_ = nullptr;
     AVFormatContext* format_ = nullptr;
@@ -87,8 +87,9 @@ private:
     std::vector<uint8_t> preroll_;
     std::vector<uint8_t> pcm_;
 
-    std::atomic<int> skipMs_{0};
+    std::atomic<double> skipMs_{0.0};
     std::atomic<double> startAt_{0.0};
+    double startOffsetSec_ = 0.0;
     bool started_ = false;
     std::atomic<uint64_t> submittedBytes_{0};
     std::atomic<bool> startedFlag_{false};
@@ -110,8 +111,8 @@ private:
     double seekTarget_ = 0.0; /* lock_ 保护 */
     bool startPending_ = false;
     double pendingStartAt_ = 0.0;
-    int pendingStartDelayMs_ = 0;
-    int pendingStartSkipMs_ = 0;
+    double pendingStartDelayMs_ = 0.0;
+    double pendingStartSkipMs_ = 0.0;
     std::uint64_t pendingStartSequence_ = 0;
 
     std::atomic<bool> abort_{false};

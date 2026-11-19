@@ -573,6 +573,9 @@ void Player::Impl::run() {
     bool syncWatchActive = false;
     double syncHighWaterMs = 0.0;
     std::int64_t lastSyncProgressMs = 0;
+    bool syncPostStartLogged = false;
+    std::int64_t syncStartWallMs = 0;
+    double syncStartSkipMs = 0.0;
     uint32_t queueMax = 0;
     int queueFlatFrames = 0;
     int videoFrames = 0;
@@ -1033,6 +1036,9 @@ void Player::Impl::run() {
         audioPendingPosition = false;
         audioStartPositionMs = 0.0;
         syncWatchActive = false;
+        syncPostStartLogged = false;
+        syncStartWallMs = 0;
+        syncStartSkipMs = 0.0;
         queueMax = 0;
         queueFlatFrames = 0;
         maxSubmittedMs = target * 1000.0;
@@ -1096,6 +1102,9 @@ void Player::Impl::run() {
             audioPendingPosition = false;
             audioStartPositionMs = 0.0;
             syncWatchActive = false;
+            syncPostStartLogged = false;
+            syncStartWallMs = 0;
+            syncStartSkipMs = 0.0;
             queueMax = 0;
             queueFlatFrames = 0;
             maxSubmittedMs = at * 1000.0;
@@ -1364,7 +1373,7 @@ void Player::Impl::run() {
                         if ((afterSeek || submittedMs > 1500.0) &&
                             queueFlatFrames >= 5) {
                             double offsetMs = presentationMs - audioBaseMs;
-                            int skipMs = (int)std::max(0.0, std::min(offsetMs, 3000.0));
+                            double skipMs = std::max(0.0, std::min(offsetMs, 3000.0));
                             /* 带 start= 打开时第一帧也处于 afterSeek，旧条件会让
                              * measuredVideoLatencyMs 永远是 0，后续 seek 全部走
                              * 兜底分支而不是首帧对齐，表现为快进后音画不同步。 */
@@ -1389,13 +1398,17 @@ void Player::Impl::run() {
                                 audio_.scheduleStart(0, skipMs);
                                 audioScheduled = true;
                                 afterSeek = false;
+                                syncStartWallMs = steadyNowMs();
+                                syncStartSkipMs = skipMs;
                                 syncLog("stable start: target=%.0f first=%.0f "
-                                        "present=%.0f latency=%d delay=0 skip=%d",
+                                        "present=%.2f latency=%d delay=0 skip=%.2f "
+                                        "frame=%.2f audio_submit=%.2f queue=%u",
                                         audioBaseMs, firstFramePtsAfterSeekMs,
-                                        presentationMs, measuredVideoLatencyMs, skipMs);
+                                        presentationMs, measuredVideoLatencyMs, skipMs,
+                                        frameMs, audio_.submittedMs(), queuedNow);
                                 fprintf(stderr,
                                         "[SlPlayer] 队列稳定，画面已越过目标，安排音频启动点: "
-                                        "呈现 %.0f ms, 目标 %.0f ms, 跳过 %d ms\n",
+                                        "呈现 %.2f ms, 目标 %.0f ms, 跳过 %.2f ms\n",
                                         presentationMs, audioBaseMs, skipMs);
                             }
                         }
@@ -1403,24 +1416,39 @@ void Player::Impl::run() {
 
                     if (audioReady && audioPendingPosition &&
                         presentationMs >= audioStartPositionMs) {
-                        int skipMs = (int)std::max(
+                        double skipMs = std::max(
                             0.0, std::min(presentationMs - audioStartPositionMs, 3000.0));
                         audio_.setPaused(false);
                         audio_.scheduleStart(0, skipMs);
                         audioScheduled = true;
                         audioPendingPosition = false;
                         afterSeek = false;
-                        syncLog("position start: target=%.0f present=%.0f skip=%d",
-                                audioStartPositionMs, presentationMs, skipMs);
+                        syncStartWallMs = steadyNowMs();
+                        syncStartSkipMs = skipMs;
+                        syncLog("position start: target=%.2f present=%.2f skip=%.2f "
+                                "frame=%.2f audio_submit=%.2f queue=%u",
+                                audioStartPositionMs, presentationMs, skipMs,
+                                frameMs, audio_.submittedMs(), queuedNow);
                         fprintf(stderr,
                                 "[SlPlayer] 画面到达目标，启动音频: "
-                                "目标 %.0f ms, 呈现 %.0f ms, 跳过 %d ms\n",
+                                "目标 %.2f ms, 呈现 %.2f ms, 跳过 %.2f ms\n",
                                 audioStartPositionMs, presentationMs, skipMs);
                     }
 
                     /* 同步等待只允许失败，不允许绕过对齐强行出声。
                      * 判据是呈现位置高水位是否推进：慢但在走就继续等，
                      * 完全停住超过阈值才报 Error 并结束播放。 */
+                    if (audioScheduled && !syncPostStartLogged && syncStartWallMs > 0 &&
+                        steadyNowMs() - syncStartWallMs >= 5000) {
+                        syncPostStartLogged = true;
+                        const double audioContentMs =
+                            audioBaseMs + syncStartSkipMs + audio_.submittedMs();
+                        syncLog("post start 5s: target=%.2f frame=%.2f present=%.2f "
+                                "audio_content=%.2f drift=%.2f skip=%.2f queue=%u",
+                                audioBaseMs, frameMs, presentationMs, audioContentMs,
+                                presentationMs - audioContentMs, syncStartSkipMs, queuedNow);
+                    }
+
                     const bool syncWaiting =
                         audioReady && !audioScheduled && videoStarted && !paused_.load();
                     if (!syncWaiting) {

@@ -8,7 +8,7 @@
 # 用法：
 #   DEVICE=root@<ip> PASS=<password> sh tools/steamlink-app/debug.sh \
 #     --content video:BV1Nvx16TEzY --scene seek_forward \
-#     --arg target=120 --seconds 30 --diag --sync-debug
+#     --arg target=120 --seconds 30 --sync-offset-ms 20 --diag --sync-debug
 #
 # 注意：本脚本不改正式启动入口；wiliwili.sh 仍负责清空 /tmp/wiliwili.log。
 # 启动前必须先拉回旧日志，拉取失败则中止，避免丢历史。
@@ -20,6 +20,7 @@ PASS=${PASS:-}
 CONTENT=${CONTENT:-}
 SCENE=${SCENE:-}
 RUN_SECONDS=${RUN_SECONDS:-30}
+SYNC_OFFSET_MS=${SYNC_OFFSET_MS:-}
 DEBUG_ARGS=()
 SCENE_ARGS=()
 WILI_FLAGS=()
@@ -38,6 +39,7 @@ while [ $# -gt 0 ]; do
         --scene) SCENE=${2:-}; shift 2 ;;
         --arg) SCENE_ARGS+=("${2:-}"); shift 2 ;;
         --seconds) RUN_SECONDS=${2:-30}; shift 2 ;;
+        --sync-offset-ms) SYNC_OFFSET_MS=${2:-}; shift 2 ;;
         --diag|--sync-debug|--http-debug|--stop-debug|--diag-all)
             WILI_FLAGS+=("$1"); shift ;;
         -h|--help) usage ;;
@@ -62,6 +64,7 @@ SCP="sshpass -p $PASS scp -o StrictHostKeyChecking=no"
     echo "scene=$SCENE"
     echo "args=${SCENE_ARGS[*]:-}"
     echo "flags=${WILI_FLAGS[*]:-}"
+    echo "sync_offset_ms=${SYNC_OFFSET_MS:-0}"
     echo "host_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "device_time=$($SSH date 2>/dev/null || echo unavailable)"
     echo "wiliwili_md5=$(md5sum "$HOME/build-wiliwili/wiliwili" 2>/dev/null | awk '{print $1}' || true)"
@@ -89,9 +92,13 @@ wili_flags_joined=""
 for f in "${WILI_FLAGS[@]:-}"; do
     wili_flags_joined="$wili_flags_joined $f"
 done
+offset_export=""
+if [ -n "$SYNC_OFFSET_MS" ]; then
+    offset_export=" SL_SYNC_AUDIO_OFFSET_MS=\"$SYNC_OFFSET_MS\""
+fi
 
 cat > "$RUN_DIR/launch_cmdline.txt" <<EOF
-export http_proxy=; export https_proxy=; cd "/home/apps/wiliwili"; setup_app_home.sh "/home/apps/wiliwili/.home"; HOME="/home/apps/wiliwili/.home" SL_DEBUG_RUN_ID="$RUN_ID" SL_DEBUG_CONTENT="$CONTENT" SL_DEBUG_SCENE="$SCENE" SL_DEBUG_ARGS="$scene_args_joined" /home/apps/wiliwili/wiliwili.sh$wili_flags_joined
+export http_proxy=; export https_proxy=; cd "/home/apps/wiliwili"; setup_app_home.sh "/home/apps/wiliwili/.home"; HOME="/home/apps/wiliwili/.home" SL_DEBUG_RUN_ID="$RUN_ID" SL_DEBUG_CONTENT="$CONTENT" SL_DEBUG_SCENE="$SCENE" SL_DEBUG_ARGS="$scene_args_joined"${offset_export} /home/apps/wiliwili/wiliwili.sh$wili_flags_joined
 EOF
 $SCP "$RUN_DIR/launch_cmdline.txt" "$DEVICE:/tmp/launch_cmdline.txt" >/dev/null 2>&1 || {
     echo "写入 launch_cmdline.txt 失败" >&2

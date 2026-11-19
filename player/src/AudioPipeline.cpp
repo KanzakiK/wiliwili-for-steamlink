@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -51,6 +52,9 @@ bool AudioPipeline::start(CSLAudioContext* context, AVFormatContext* format,
     source_ = source;
     audioIndex_ = audioIndex;
     selfDemux_ = selfDemux;
+    startOffsetSec_ = 0.0;
+    if (const char* offset = std::getenv("SL_SYNC_AUDIO_OFFSET_MS"))
+        startOffsetSec_ = std::atof(offset) / 1000.0;
 
     AVStream* stream = format->streams[audioIndex];
     const AVCodec* codec = avcodec_find_decoder(stream->codecpar->codec_id);
@@ -222,7 +226,7 @@ void AudioPipeline::requestSeek(double targetSeconds) {
     cond_.notify_all();
 }
 
-void AudioPipeline::scheduleStart(int delayMs, int skipMs) {
+void AudioPipeline::scheduleStart(double delayMs, double skipMs) {
     {
         std::lock_guard<std::mutex> lock(lock_);
         if (seekActive_.load()) {
@@ -231,7 +235,7 @@ void AudioPipeline::scheduleStart(int delayMs, int skipMs) {
              * 若等 seek 完成后才用 delayMs 重新计时，会把等待 seek 的时间
              * 再次加到音频延迟上，表现为 seek 后声音滞后。 */
             startPending_ = true;
-            pendingStartAt_ = monotonicSeconds() + std::max(0, delayMs) / 1000.0;
+            pendingStartAt_ = monotonicSeconds() + std::max(0.0, delayMs) / 1000.0;
             pendingStartDelayMs_ = delayMs;
             pendingStartSkipMs_ = skipMs;
             pendingStartSequence_ = seekSequence_.load();
@@ -243,13 +247,14 @@ void AudioPipeline::scheduleStart(int delayMs, int skipMs) {
     cond_.notify_all();
 }
 
-void AudioPipeline::applyStartLocked(int delayMs, int skipMs) {
-    applyStartAtLocked(monotonicSeconds() + std::max(0, delayMs) / 1000.0, skipMs);
+void AudioPipeline::applyStartLocked(double delayMs, double skipMs) {
+    applyStartAtLocked(monotonicSeconds() + std::max(0.0, delayMs) / 1000.0, skipMs);
 }
 
-void AudioPipeline::applyStartAtLocked(double atSeconds, int skipMs) {
-    skipMs_.store(std::max(0, skipMs));
-    startAt_.store(atSeconds);
+void AudioPipeline::applyStartAtLocked(double atSeconds, double skipMs) {
+    skipMs_.store(std::max(0.0, skipMs));
+    /* 正值让音频整体晚启动，负值让音频提前；所有启动路径只在此加一次。 */
+    startAt_.store(atSeconds + startOffsetSec_);
 }
 
 double AudioPipeline::submittedMs() const {
@@ -446,12 +451,14 @@ void AudioPipeline::submit(const uint8_t* data, int size) {
         startedFlag_ = true;
 
         int rate = rate_.load();
-        size_t skipBytes = (size_t)skipMs_.load() * rate * 4 / 1000;
+        size_t skipBytes = (size_t)(skipMs_.load() * rate * 4.0 / 1000.0);
         if (skipBytes > preroll_.size())
             skipBytes = preroll_.size();
         if (rate > 0) {
-            fprintf(stderr, "[SlAudio] 启动: 预缓冲 %.2f s, 跳过 %.2f s\n",
-                    preroll_.size() / (rate * 4.0), skipBytes / (rate * 4.0));
+            fprintf(stderr,
+                    "[SlAudio] 启动: 预缓冲 %.3f s, 跳过 %.3f s, 偏移 %.1f ms\n",
+                    preroll_.size() / (rate * 4.0), skipBytes / (rate * 4.0),
+                    startOffsetSec_ * 1000.0);
         }
         if (preroll_.size() > skipBytes) {
             submitDirect(preroll_.data() + skipBytes,
