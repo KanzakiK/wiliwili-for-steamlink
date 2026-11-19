@@ -103,6 +103,15 @@ if [ -f "$DEBUG_SESSION_PATCH" ] && [ -d "$SOURCE/.git" ]; then
     fi
 fi
 
+# D27：启动期 debug 场景控制器。只在 SL_DEBUG_RUN_ID/SCENE 存在时执行。
+DEBUG_CONTROLLER_PATCH="$PROJECT_DIR/tools/patches/wiliwili-debug-controller.patch"
+if [ -f "$DEBUG_CONTROLLER_PATCH" ] && [ -d "$SOURCE/.git" ]; then
+    if ! grep -q 'd27ExpectPlaying' "$SOURCE/wiliwili/source/main.cpp" 2>/dev/null; then
+        echo "apply wiliwili debug controller patch"
+        git -C "$SOURCE" apply --recount "$DEBUG_CONTROLLER_PATCH"
+    fi
+fi
+
 # D16：按 Steam Link 实际显示尺寸收敛图片请求，降低 JPEG 解码和 GPU 纹理占用。
 # 只改请求后缀常量，不改 wiliwili 布局/样式/Activity 行为。
 IMAGE_SIZE_PATCH="$PROJECT_DIR/tools/patches/wiliwili-image-size.patch"
