@@ -1335,6 +1335,49 @@ static void lifecycle_log(const char *fmt, ...) {
     va_end(args);
 }
 
+/* D27 日志脱敏：URL 只保留 '?' 前的静态路径文件名；extra 只保留键名。
+ * 禁止把 upsig/trid/buvid/audio-file URL 等写进统一日志。 */
+static void safe_url_for_log(const char *url, char *out, size_t cap) {
+    if (!url || !out || cap == 0) return;
+    const char *end = strchr(url, '?');
+    size_t scanLen = end ? (size_t)(end - url) : strlen(url);
+    const char *base = url;
+    for (size_t i = 0; i < scanLen; ++i) {
+        if (url[i] == '/') base = url + i + 1;
+    }
+    size_t len = end ? (size_t)(end - base) : strlen(base);
+    if (len >= cap) len = cap - 1;
+    memcpy(out, base, len);
+    out[len] = '\0';
+}
+
+static void safe_extra_keys_for_log(const char *extra, char *out, size_t cap) {
+    if (!out || cap == 0) return;
+    out[0] = '\0';
+    if (!extra || !*extra) return;
+    size_t off = 0;
+    int inQuote = 0;
+    char key[64];
+    size_t keyLen = 0;
+    for (const char *p = extra;; ++p) {
+        char c = *p;
+        if (c == '"') {
+            inQuote = !inQuote;
+        } else if ((c == ',' && !inQuote) || c == '\0') {
+            char *eq = keyLen > 0 && keyLen < sizeof(key) ? strchr(key, '=') : NULL;
+            if (eq) {
+                *eq = '\0';
+                int n = snprintf(out + off, cap - off, "%s%s", off ? "," : "", key);
+                if (n > 0 && (size_t)n < cap - off) off += (size_t)n;
+            }
+            keyLen = 0;
+            if (c == '\0') break;
+        } else if (keyLen + 1 < sizeof(key)) {
+            key[keyLen++] = c;
+        }
+    }
+}
+
 int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **args) {
     (void)reply_userdata;
     if (!ctx || !args || !args[0]) return MPV_ERROR_INVALID_PARAMETER;
@@ -1379,7 +1422,9 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
                        sizeof(ctx->backup[0]));
             int queued = ctx->backupCount;
             pthread_mutex_unlock(&ctx->txMutex);
-            fprintf(stderr, "[mpv-compat] 备用源入队(%d): %.70s\n", queued, url);
+            char safeUrl[160];
+            safe_url_for_log(url, safeUrl, sizeof(safeUrl));
+            fprintf(stderr, "[mpv-compat] 备用源入队(%d): %s\n", queued, safeUrl);
             return MPV_ERROR_SUCCESS;
         }
         /* replace：新的主源，清空旧备用队列，并进入播放页透明模式 */
@@ -1415,9 +1460,13 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
                       (unsigned long long)openGen, (unsigned long long)openReq,
                       ctx->playbackActive);
         const char *mediaTag = getenv("SL_MEDIA_TAG");
-        fprintf(stderr, "[mpv-compat] loadfile: gen=%llu req=%llu tag=%s %s\n",
+        char safeUrl[160], safeKeys[256];
+        safe_url_for_log(url, safeUrl, sizeof(safeUrl));
+        safe_extra_keys_for_log(extra, safeKeys, sizeof(safeKeys));
+        fprintf(stderr,
+                "[mpv-compat] loadfile: gen=%llu req=%llu tag=%s url=%s extra_keys=%s\n",
                 (unsigned long long)openGen, (unsigned long long)openReq,
-                mediaTag ? mediaTag : "-", url);
+                mediaTag ? mediaTag : "-", safeUrl, safeKeys);
         return send_session_meta_and_open(ctx, openGen, openReq, frame);
     }
     if (strcmp(cmd, "set") == 0) {

@@ -92,8 +92,12 @@ int main(int argc, char **argv) {
 
     const char *extra =
         "referrer=\"https://www.bilibili.com/\",start=0,"
-        "run=compat-probe,session=compat-probe-1,content=video,id=BVTEST";
-    const char *args[] = {"loadfile", "file:///nonexistent/d27.mp4", "replace", extra, NULL};
+        "run=compat-probe,session=compat-probe-1,content=video,id=BVTEST,"
+        "audio-file=\"https://example.invalid/a.m4s?upsig=SECRET_SHOULD_NOT_LOG\"";
+    const char *args[] = {
+        "loadfile",
+        "https://example.invalid/v.m4s?upsig=SECRET_SHOULD_NOT_LOG&trid=SECRET2",
+        "replace", extra, NULL};
     if (mpv_command_async(ctx, 1, args) < 0) return 1;
     usleep(500000);
     mpv_terminate_destroy(ctx);

@@ -85,6 +85,15 @@ if [ -f "$MEDIA_TAG_PATCH" ] && [ -d "$SOURCE/.git" ]; then
     fi
 fi
 
+# D27：统一日志脱敏，禁止把签名 URL / extra 值写进 /tmp/wiliwili.log。
+LOG_REDACTION_PATCH="$PROJECT_DIR/tools/patches/wiliwili-debug-log-redaction.patch"
+if [ -f "$LOG_REDACTION_PATCH" ] && [ -d "$SOURCE/.git" ]; then
+    if ! grep -q 'slSafeUrlForLog' "$SOURCE/wiliwili/source/view/mpv_core.cpp" 2>/dev/null; then
+        echo "apply wiliwili debug log redaction patch"
+        git -C "$SOURCE" apply --recount "$LOG_REDACTION_PATCH"
+    fi
+fi
+
 # D16：按 Steam Link 实际显示尺寸收敛图片请求，降低 JPEG 解码和 GPU 纹理占用。
 # 只改请求后缀常量，不改 wiliwili 布局/样式/Activity 行为。
 IMAGE_SIZE_PATCH="$PROJECT_DIR/tools/patches/wiliwili-image-size.patch"
