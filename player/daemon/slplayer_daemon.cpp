@@ -55,7 +55,11 @@ static std::string sessionLogPrefix(std::uint64_t gen) {
     auto it = g_sessionMeta.find(gen);
     if (it == g_sessionMeta.end() || !it->second.run[0] || !it->second.session[0])
         return "run=- session=-";
-    return std::string("run=") + it->second.run + " session=" + it->second.session;
+    std::string prefix = std::string("run=") + it->second.run +
+                         " session=" + it->second.session;
+    if (it->second.bv[0])
+        prefix += std::string(" bv=") + it->second.bv;
+    return prefix;
 }
 
 static long long lifecycleNowMs() {
@@ -404,7 +408,7 @@ int main(int argc, char** argv) {
         const std::string& cmd = f[0];
 
         if (cmd == SL_CMD_META) {
-            /* meta<TAB>gen<TAB>req<TAB>run=<id><TAB>session=<id><TAB>content=<type><TAB>id=<primary> */
+            /* meta<TAB>gen<TAB>req<TAB>run=<id><TAB>session=<id><TAB>content=<type><TAB>id=<primary>[<TAB>bv=<BV>] */
             if (f.size() < 7) {
                 daemonLog("bad meta command");
                 continue;
@@ -422,8 +426,9 @@ int main(int argc, char** argv) {
                 continue;
             }
             storeSessionMeta(gen, meta);
-            lifecycleLogFor(gen, "meta ok run=%s session=%s content=%s id=%s",
-                            meta.run, meta.session, meta.content, meta.id);
+            lifecycleLogFor(gen, "meta ok run=%s session=%s content=%s id=%s bv=%s",
+                            meta.run, meta.session, meta.content, meta.id,
+                            meta.bv[0] ? meta.bv : "-");
             continue;
         }
 

@@ -173,7 +173,7 @@ public:
 
     // D27: debug session；只在 SL_DEBUG_RUN_ID 存在时生效
     void setDebugSession(const std::string& content, const std::string& id,
-                         const std::string& detail = "");
+                         const std::string& detail = "", const std::string& bv = "");
     static std::string getDebugRun();
     static std::string getDebugSession();
 
@@ -290,6 +290,7 @@ private:
     inline static std::string debugContent;
     inline static std::string debugId;
     inline static std::string debugDetail;
+    inline static std::string debugBv;
     /// 生命周期令牌，析构时置为 false。
     /// 订阅以 std::list 迭代器管理，一旦重复订阅就会覆盖 eventSubscribeID，
     /// 旧订阅将永久残留在事件链表中并持有悬空的 this。回调开头检查此令牌，

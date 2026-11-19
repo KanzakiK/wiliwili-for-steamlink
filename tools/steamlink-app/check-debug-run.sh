@@ -71,6 +71,30 @@ case "$SCENE" in
             check_pattern wiliwili.log "[UI][run=$RUN_ID][session=$SESSION] content start" "UI content start"
             check_pattern wiliwili.log "run=$RUN_ID session=$SESSION" "daemon session"
             check_pattern wiliwili.log "meta ok run=$RUN_ID session=$SESSION" "meta 完成"
+
+            CONTENT_TYPE=$(grep -F "[UI][run=$RUN_ID][session=$SESSION] content start" "$RUN_DIR/wiliwili.log" 2>/dev/null |
+                sed -n 's/.* content start content=\([^ ]*\).*/\1/p' | head -1)
+            UI_BV=$(grep -F "[UI][run=$RUN_ID][session=$SESSION] content start" "$RUN_DIR/wiliwili.log" 2>/dev/null |
+                sed -n 's/.* bv=\([^ ]*\).*/\1/p' | head -1)
+            META_BV=$(grep -F "meta ok run=$RUN_ID session=$SESSION" "$RUN_DIR/wiliwili.log" 2>/dev/null |
+                sed -n 's/.* bv=\([^ ]*\).*/\1/p' | head -1)
+            case "$CONTENT_TYPE" in
+                video|season)
+                    if [ -z "$UI_BV" ] || [ "$UI_BV" = "-" ]; then
+                        fail "UI content start 缺少 BV"
+                    else
+                        pass "UI content start 含 BV: $UI_BV"
+                    fi
+                    if [ -z "$META_BV" ] || [ "$META_BV" != "$UI_BV" ]; then
+                        fail "daemon meta BV 缺失或不一致: ui=$UI_BV meta=$META_BV"
+                    else
+                        pass "daemon meta BV 一致: $META_BV"
+                    fi
+                    ;;
+                *)
+                    pass "非 video/season 场景不要求 BV"
+                    ;;
+            esac
         fi
         ;;
 esac

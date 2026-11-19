@@ -808,7 +808,7 @@ void VideoView::onLayout() { brls::View::onLayout(); }
 
 // D27: 由 UI 侧生成权威 session，只在 SL_DEBUG_RUN_ID 存在时生效。
 void VideoView::setDebugSession(const std::string& content, const std::string& id,
-                                const std::string& detail) {
+                                const std::string& detail, const std::string& bv) {
     const char* run = getenv("SL_DEBUG_RUN_ID");
     if (!run || !*run) return;
     static std::atomic<uint64_t> seq{0};
@@ -817,10 +817,11 @@ void VideoView::setDebugSession(const std::string& content, const std::string& i
     debugContent = content;
     debugId = id;
     debugDetail = detail;
+    debugBv = bv;
     fprintf(stderr,
-            "[UI][run=%s][session=%s] content start content=%s id=%s detail=%s\n",
+            "[UI][run=%s][session=%s] content start content=%s id=%s bv=%s detail=%s\n",
             debugRun.c_str(), debugSession.c_str(), debugContent.c_str(),
-            debugId.c_str(), debugDetail.c_str());
+            debugId.c_str(), debugBv.c_str(), debugDetail.c_str());
 }
 
 std::string VideoView::getDebugRun() { return debugRun; }
@@ -856,6 +857,8 @@ std::string VideoView::genExtraUrlParam(int start, int end, const std::vector<st
     if (!debugRun.empty()) {
         extra += fmt::format(",run={},session={},content={},id={}",
                              debugRun, debugSession, debugContent, debugId);
+        if (!debugBv.empty())
+            extra += fmt::format(",bv={}", debugBv);
     }
     return extra;
 }

@@ -46,15 +46,17 @@ extern "C" {
 #define SL_IPC_FRAME_ARGS_FIELD     3
 
 /* ---- D27 调试会话元数据 ----
- * run/session/content/id 由 dev 构建的 UI 侧生成，经 loadfile extra 进入兼容层，
+ * run/session/content/id/bv 由 dev 构建的 UI 侧生成，经 loadfile extra 进入兼容层，
  * 兼容层在 open 前发送 meta 命令；daemon 按 generation 保存并用于日志前缀。
+ * bv 对 video/season 必填，live/dynamic/page 可空。
  * 字段值不含 TAB、换行、逗号和 '='，不携带签名 URL 或任何查询参数。
  */
-#define SL_CMD_META        "meta"      /* meta<TAB>gen<TAB>req<TAB>run=<id><TAB>session=<id><TAB>content=<type><TAB>id=<primary> */
+#define SL_CMD_META        "meta"      /* meta<TAB>gen<TAB>req<TAB>run=<id><TAB>session=<id><TAB>content=<type><TAB>id=<primary>[<TAB>bv=<BV>] */
 #define SL_META_RUN_KEY    "run"
 #define SL_META_SESSION_KEY "session"
 #define SL_META_CONTENT_KEY "content"
 #define SL_META_ID_KEY      "id"
+#define SL_META_BV_KEY      "bv"
 #define SL_META_FIELD_MAX   128
 
 typedef struct {
@@ -62,6 +64,7 @@ typedef struct {
     char session[SL_META_FIELD_MAX];
     char content[SL_META_FIELD_MAX];
     char id[SL_META_FIELD_MAX];
+    char bv[SL_META_FIELD_MAX];
 } sl_session_meta_t;
 
 static inline int sl_session_meta_assign(sl_session_meta_t *meta,
@@ -77,6 +80,8 @@ static inline int sl_session_meta_assign(sl_session_meta_t *meta,
         dst = meta->content;
     else if (strcmp(key, SL_META_ID_KEY) == 0)
         dst = meta->id;
+    else if (strcmp(key, SL_META_BV_KEY) == 0)
+        dst = meta->bv;
     if (!dst)
         return 0;
     if (!*value || strchr(value, '=') || strchr(value, ' '))
@@ -163,7 +168,16 @@ static inline size_t sl_session_meta_format_args(const sl_session_meta_t *meta,
                      SL_META_SESSION_KEY, meta->session,
                      SL_META_CONTENT_KEY, meta->content,
                      SL_META_ID_KEY, meta->id);
-    return n > 0 && (size_t)n < cap ? (size_t)n : 0;
+    if (n <= 0 || (size_t)n >= cap)
+        return 0;
+    size_t len = (size_t)n;
+    if (meta->bv[0]) {
+        n = snprintf(dst + len, cap - len, "\t%s=%s", SL_META_BV_KEY, meta->bv);
+        if (n <= 0 || (size_t)n >= cap - len)
+            return 0;
+        len += (size_t)n;
+    }
+    return len;
 }
 
 /* ---- 命令（兼容层 -> daemon）---- */
