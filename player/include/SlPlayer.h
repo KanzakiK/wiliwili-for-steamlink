@@ -16,6 +16,8 @@
 #include <string>
 #include <vector>
 
+#include "DebugLog.h"
+
 namespace sl {
 
 struct SourceSpec {
@@ -29,6 +31,8 @@ struct SourceSpec {
     double startSeconds = 0.0;
     /* 0 表示播放到文件结尾 */
     double endSeconds = 0.0;
+    /* D27 调试上下文，仅由 debug 入口填充；正式路径为空。 */
+    DebugLogContext debug;
 };
 
 struct VideoInfo {

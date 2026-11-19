@@ -173,7 +173,8 @@ public:
 
     // D27: debug session；只在 SL_DEBUG_RUN_ID 存在时生效
     void setDebugSession(const std::string& content, const std::string& id,
-                         const std::string& detail = "", const std::string& bv = "");
+                         const std::string& detail = "", const std::string& bv = "",
+                         const std::string& cid = "", const std::string& qn = "");
     static std::string getDebugRun();
     static std::string getDebugSession();
 
@@ -289,6 +290,8 @@ private:
     inline static std::string debugSession;
     inline static std::string debugContent;
     inline static std::string debugId;
+    inline static std::string debugCid;
+    inline static std::string debugQn;
     inline static std::string debugDetail;
     inline static std::string debugBv;
     /// 生命周期令牌，析构时置为 false。

@@ -26,6 +26,7 @@
 #include "fragment/player_setting.hpp"
 #include "fragment/player_dlna_search.hpp"
 #include "view/video_view.hpp"
+#include "utils/debug_log.hpp"
 
 #include "utils/shortcut_helper.hpp"
 #include "view/live_core.hpp"
@@ -808,20 +809,19 @@ void VideoView::onLayout() { brls::View::onLayout(); }
 
 // D27: 由 UI 侧生成权威 session，只在 SL_DEBUG_RUN_ID 存在时生效。
 void VideoView::setDebugSession(const std::string& content, const std::string& id,
-                                const std::string& detail, const std::string& bv) {
+                                const std::string& detail, const std::string& bv,
+                                const std::string& cid, const std::string& qn) {
     const char* run = getenv("SL_DEBUG_RUN_ID");
     if (!run || !*run) return;
-    static std::atomic<uint64_t> seq{0};
+    std::string detailText = detail;
     debugRun = run;
-    debugSession = fmt::format("{}-{}", run, seq.fetch_add(1) + 1);
+    debugSession = wiliwili::d27::reuseOrBeginSession(content, id, detailText, bv);
     debugContent = content;
     debugId = id;
+    debugCid = cid;
+    debugQn = qn;
     debugDetail = detail;
     debugBv = bv;
-    fprintf(stderr,
-            "[UI][run=%s][session=%s] content start content=%s id=%s bv=%s detail=%s\n",
-            debugRun.c_str(), debugSession.c_str(), debugContent.c_str(),
-            debugId.c_str(), debugBv.c_str(), debugDetail.c_str());
 }
 
 std::string VideoView::getDebugRun() { return debugRun; }
@@ -859,6 +859,10 @@ std::string VideoView::genExtraUrlParam(int start, int end, const std::vector<st
                              debugRun, debugSession, debugContent, debugId);
         if (!debugBv.empty())
             extra += fmt::format(",bv={}", debugBv);
+        if (!debugCid.empty())
+            extra += fmt::format(",cid={}", debugCid);
+        if (!debugQn.empty())
+            extra += fmt::format(",qn={}", debugQn);
     }
     return extra;
 }

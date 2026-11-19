@@ -35,9 +35,11 @@
 #include "IpcProtocol.h"
 
 /* 实现定义在下方；恢复失败时要恢复 UI 的不透明清屏。 */
-static void transparency_disable(void);
+static void transparency_disable(mpv_handle *ctx);
 static void update_prop_and_notify(mpv_handle *ctx, const char *name,
                                    mpv_format fmt, void *value);
+static void d27_log(mpv_handle *ctx, const char *source, uint64_t gen,
+                    uint64_t req, const char *fmt, ...);
 
 /* ---- GL 函数加载（保留原桩逻辑，borealis 透明层补丁依赖）----
  * borealis 自带的 glad 是桌面 GL 加载器，在 GLES2 上下文中不会加载 GL 3.0 的
@@ -109,6 +111,7 @@ struct mpv_handle {
      * 每个 pause/resume/seek 分配唯一请求号，完成事件原样回传。 */
     uint64_t fileGeneration;
     uint64_t requestSeq;
+    uint64_t lastCommandReq;
     /* 本文件 open 命令的 start= 目标，仅用于 FILE_LOADED 后等价 seek 去重。 */
     double initialSeekTarget;
     int hasInitialSeekTarget;
@@ -117,6 +120,7 @@ struct mpv_handle {
      * 备用源切换和 watchdog 回放复用。 */
     sl_session_meta_t sessionMeta;
     int hasSessionMeta;
+    pthread_mutex_t metaMutex;
 
     /* 断连恢复所需的播放快照 */
     int hasLastOpen;
@@ -265,8 +269,10 @@ static int send_session_meta_and_open(mpv_handle *ctx, uint64_t gen, uint64_t re
         return MPV_ERROR_GENERIC;
     }
     int fd = ctx->sock;
+    pthread_mutex_lock(&ctx->metaMutex);
     hasMeta = ctx->hasSessionMeta;
     if (hasMeta) meta = ctx->sessionMeta;
+    pthread_mutex_unlock(&ctx->metaMutex);
 
     if (hasMeta) {
         char args[1024];
@@ -288,6 +294,11 @@ static int send_session_meta_and_open(mpv_handle *ctx, uint64_t gen, uint64_t re
         rc = send_payload(fd, openCmd, strlen(openCmd));
     pthread_mutex_unlock(&ctx->txMutex);
     pthread_mutex_unlock(&ctx->daemonMutex);
+    if (hasMeta)
+        d27_log(ctx, "CMD", gen, req,
+                "meta gen=%llu req=%llu run=%s session=%s status=sent",
+                (unsigned long long)gen, (unsigned long long)req,
+                meta.run, meta.session);
     return rc == 0 ? MPV_ERROR_SUCCESS : MPV_ERROR_GENERIC;
 }
 
@@ -298,6 +309,7 @@ static int send_context_cmd(mpv_handle *ctx, const char *name, const char *fmt, 
     pthread_mutex_lock(&ctx->daemonMutex);
     gen = ctx->fileGeneration;
     req = ++ctx->requestSeq;
+    ctx->lastCommandReq = req;
     pthread_mutex_unlock(&ctx->daemonMutex);
 
     char body[1024];
@@ -475,9 +487,9 @@ static void update_prop_and_notify(mpv_handle *ctx, const char *name,
         (strcmp(name, "core-idle") == 0 || strcmp(name, "playback-time") == 0 ||
          strcmp(name, "pause") == 0 || strcmp(name, "speed") == 0)) {
         if (fmt == MPV_FORMAT_FLAG)
-            fprintf(stderr, "[mpv-prop] %s=%d\n", name, *(int *)value ? 1 : 0);
+            d27_log(ctx, "PROP", 0, 0, "%s=%d", name, *(int *)value ? 1 : 0);
         else if (fmt == MPV_FORMAT_DOUBLE)
-            fprintf(stderr, "[mpv-prop] %s=%.3f\n", name, *(double *)value);
+            d27_log(ctx, "PROP", 0, 0, "%s=%.3f", name, *(double *)value);
     }
     push_prop_event(ctx, name, 0, fmt, value);
 }
@@ -497,6 +509,37 @@ static long long envMs(const char *name, long long fallback, long long minMs, lo
     long long v = strtoll(s, &end, 10);
     if (!end || *end || v < minMs || v > maxMs) return fallback;
     return v;
+}
+
+/* D27 统一日志格式：
+ * [HH:MM:SS.mmm][SOURCE][run=...][session=...][gen=...][req=...] message
+ * metaMutex 独立于 daemonMutex，watchdog 持有 daemonMutex 时也能安全记录。 */
+static void d27_log(mpv_handle *ctx, const char *source, uint64_t gen,
+                    uint64_t req, const char *fmt, ...) {
+    sl_session_meta_t meta;
+    memset(&meta, 0, sizeof(meta));
+    if (ctx) {
+        pthread_mutex_lock(&ctx->metaMutex);
+        meta = ctx->sessionMeta;
+        pthread_mutex_unlock(&ctx->metaMutex);
+    }
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    struct tm tm;
+    localtime_r(&ts.tv_sec, &tm);
+    fprintf(stderr,
+            "[%02d:%02d:%02d.%03ld][%s][run=%s][session=%s]"
+            "[gen=%llu][req=%llu] ",
+            tm.tm_hour, tm.tm_min, tm.tm_sec,
+            (long)(ts.tv_nsec / 1000000L), source,
+            meta.run[0] ? meta.run : "-",
+            meta.session[0] ? meta.session : "-",
+            (unsigned long long)gen, (unsigned long long)req);
+    va_list args;
+    va_start(args, fmt);
+    vfprintf(stderr, fmt, args);
+    va_end(args);
+    fputc('\n', stderr);
 }
 
 /* D22：软卡顿只向 UI 发一次性提示，不触发 watchdog/透明层/END_FILE。 */
@@ -521,18 +564,21 @@ static const char *signalName(int sig) {
     }
 }
 
-static void log_daemon_exit(pid_t pid, int status, const char *reason) {
+static void log_daemon_exit(mpv_handle *ctx, pid_t pid, int status,
+                            const char *reason) {
     if (WIFEXITED(status)) {
-        fprintf(stderr, "[mpv-compat] daemon 退出(reason=%s): pid=%d code=%d\n",
+        d27_log(ctx, "COMPAT", 0, 0,
+                "daemon exit reason=%s pid=%d code=%d",
                 reason ? reason : "-", (int)pid, WEXITSTATUS(status));
     } else if (WIFSIGNALED(status)) {
         int sig = WTERMSIG(status);
-        fprintf(stderr,
-                "[mpv-compat] daemon 退出(reason=%s): pid=%d signal=%d(%s)%s\n",
+        d27_log(ctx, "COMPAT", 0, 0,
+                "daemon exit reason=%s pid=%d signal=%d(%s)%s",
                 reason ? reason : "-", (int)pid, sig, signalName(sig),
                 WCOREDUMP(status) ? " core" : "");
     } else {
-        fprintf(stderr, "[mpv-compat] daemon 退出(reason=%s): pid=%d status=0x%x\n",
+        d27_log(ctx, "COMPAT", 0, 0,
+                "daemon exit reason=%s pid=%d status=0x%x",
                 reason ? reason : "-", (int)pid, status);
     }
 }
@@ -601,8 +647,8 @@ static int record_restart_locked(mpv_handle *ctx) {
             recent++;
     }
     if (recent >= DAEMON_RESTART_MAX) {
-        fprintf(stderr,
-                "[mpv-compat] daemon 重启过于频繁（%d 次/%dms），暂停自动重启\n",
+        d27_log(ctx, "COMPAT", 0, 0,
+                "restart limit reached count=%d window=%dms",
                 recent, DAEMON_RESTART_WINDOW_MS);
         return -1;
     }
@@ -624,13 +670,15 @@ static void reap_daemon_locked(mpv_handle *ctx, const char *reason, int maxWaitM
         usleep(50 * 1000);
     }
     if (r == 0) {
-        fprintf(stderr, "[mpv-compat] daemon 未按时退出，补发 SIGKILL: pid=%d\n", (int)pid);
+        d27_log(ctx, "COMPAT", 0, 0,
+                "daemon reap timeout pid=%d send SIGKILL", (int)pid);
         kill(pid, SIGKILL);
         while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
         r = pid;
     }
-    if (r == pid) log_daemon_exit(pid, status, reason);
-    else fprintf(stderr, "[mpv-compat] daemon 回收失败: pid=%d errno=%s\n",
+    if (r == pid) log_daemon_exit(ctx, pid, status, reason);
+    else d27_log(ctx, "COMPAT", 0, 0,
+                 "daemon reap failed pid=%d errno=%s",
                  (int)pid, strerror(errno));
     ctx->daemonPid = 0;
 }
@@ -680,7 +728,7 @@ static int start_daemon_process(mpv_handle *ctx, const char *reason) {
         _exit(127);
     }
     if (pid < 0) {
-        fprintf(stderr, "[mpv-compat] fork daemon 失败: %s\n", strerror(errno));
+        d27_log(ctx, "COMPAT", 0, 0, "fork daemon failed errno=%s", strerror(errno));
         pthread_mutex_unlock(&ctx->daemonMutex);
         return -1;
     }
@@ -708,7 +756,7 @@ static int start_daemon_process(mpv_handle *ctx, const char *reason) {
 
     int fd = connect_daemon_socket(ctx);
     if (fd < 0) {
-        fprintf(stderr, "[mpv-compat] connect daemon 失败\n");
+    d27_log(ctx, "COMPAT", 0, 0, "connect daemon failed");
         kill(pid, SIGKILL);
         int status = 0;
         while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
@@ -718,7 +766,8 @@ static int start_daemon_process(mpv_handle *ctx, const char *reason) {
     }
     ctx->sock = fd;
     ctx->initialized = 1;
-    fprintf(stderr, "[mpv-compat] daemon 已启动(reason=%s): pid=%d generation=%d\n",
+    d27_log(ctx, "COMPAT", (uint64_t)ctx->daemonGeneration, 0,
+            "daemon started reason=%s pid=%d generation=%d",
             reason ? reason : "-", (int)pid, ctx->daemonGeneration);
     pthread_mutex_unlock(&ctx->daemonMutex);
     return 0;
@@ -734,7 +783,8 @@ static int recover_daemon_connection(mpv_handle *ctx) {
     if (ctx->shuttingDown) {
         /* 正常退出要给 daemon 完成 stop → FreeStream → FreeContext 的时间，
          * 否则 SIGKILL 会留下 VPU 脏标记。 */
-        fprintf(stderr, "[mpv-compat] 正常终止中，等待 daemon 清理 VPU\n");
+        d27_log(ctx, "COMPAT", (uint64_t)gen, 0,
+                "shutdown waiting for daemon VPU cleanup");
         reap_daemon_locked(ctx, reason, DAEMON_REAP_TERMINATE_MS);
         if (ctx->sock >= 0) {
             close(ctx->sock);
@@ -743,8 +793,8 @@ static int recover_daemon_connection(mpv_handle *ctx) {
         pthread_mutex_unlock(&ctx->daemonMutex);
         return -1;
     }
-    fprintf(stderr, "[mpv-compat] IPC 接收断开，启动恢复流程(reason=%s, generation=%d)\n",
-            reason, gen);
+    d27_log(ctx, "COMPAT", (uint64_t)gen, 0,
+            "recovery enter reason=%s daemon_generation=%d", reason, gen);
 
     reap_daemon_locked(ctx, reason, DAEMON_REAP_RECOVERY_MS);
     if (ctx->sock >= 0) {
@@ -753,7 +803,7 @@ static int recover_daemon_connection(mpv_handle *ctx) {
     }
     if (record_restart_locked(ctx) < 0) {
         ctx->initialized = 0;
-        transparency_disable();
+        transparency_disable(ctx);
         pthread_mutex_unlock(&ctx->daemonMutex);
         return -1;
     }
@@ -775,7 +825,7 @@ static int recover_daemon_connection(mpv_handle *ctx) {
     clear_queued_events(ctx);
 
     if (start_daemon_process(ctx, reason) < 0) {
-        transparency_disable();
+        transparency_disable(ctx);
         return -1;
     }
 
@@ -791,11 +841,11 @@ static int recover_daemon_connection(mpv_handle *ctx) {
         ctx->resumePosition = pos;
         snprintf(ctx->lastOpenCmd, sizeof(ctx->lastOpenCmd), "%s", openCmd);
         pthread_mutex_unlock(&ctx->daemonMutex);
-        fprintf(stderr, "[mpv-compat] 恢复播放: gen=%llu req=%llu pos=%.3f pause=%d\n",
-                (unsigned long long)replayGen, (unsigned long long)replayReq,
-                pos, expPause);
+        d27_log(ctx, "COMPAT", replayGen, replayReq,
+                "replay open pos=%.3f pause=%d status=sent", pos, expPause);
         if (send_session_meta_and_open(ctx, replayGen, replayReq, openCmd) != MPV_ERROR_SUCCESS)
-            fprintf(stderr, "[mpv-compat] 恢复播放的 open 命令发送失败\n");
+            d27_log(ctx, "COMPAT", replayGen, replayReq,
+                    "replay open status=error");
     }
     fire_wakeup(ctx);
     return 0;
@@ -816,14 +866,14 @@ static void *watchdog_thread(void *arg) {
     int healthForce = getenv("SL_HEALTH_FORCE") && strcmp(getenv("SL_HEALTH_FORCE"), "1") == 0;
     const char *disable = getenv("SL_WATCHDOG_DISABLE");
     if (disable && strcmp(disable, "1") == 0) {
-        fprintf(stderr, "[mpv-compat] watchdog 已由 SL_WATCHDOG_DISABLE=1 关闭\n");
+        d27_log(ctx, "COMPAT", 0, 0, "watchdog disabled by SL_WATCHDOG_DISABLE=1");
         return NULL;
     }
-    fprintf(stderr,
-            "[mpv-compat] watchdog 启动: poll=%lldms stall=%lldms nohb=%lldms grace=%lldms\n",
+    d27_log(ctx, "COMPAT", 0, 0,
+            "watchdog start poll=%lldms stall=%lldms nohb=%lldms grace=%lldms",
             pollMs, stallMs, noHbMs, graceMs);
-    fprintf(stderr,
-            "[mpv-compat] health 启动: window=%lldms progress=%lldms net_grace=%lldms force=%d\n",
+    d27_log(ctx, "COMPAT", 0, 0,
+            "health start window=%lldms progress=%lldms net_grace=%lldms force=%d",
             healthWindowMs, healthProgressMs, healthNetGraceMs, healthForce ? 1 : 0);
 
     while (1) {
@@ -891,14 +941,14 @@ static void *watchdog_thread(void *arg) {
                     pthread_mutex_lock(&ctx->daemonMutex);
                     if (ctx->daemonGeneration == gen && ctx->daemonPid > 0 &&
                         !ctx->shuttingDown && ctx->playbackActive) {
-                        fprintf(stderr,
-                                "[mpv-compat] watchdog 判定卡死: gen=%d pid=%d "
-                                "hbAge=%lldms frameAge=%lldms playing=%d transition=%d "
-                                "pause=%d workerAlive=%d action=%s\n",
-                                gen, pid, hbAge, frameAge, playing, inTransition, expPause,
-                                workerAlive,
-                                noHeartbeat ? "无心跳" :
-                                (workerDead ? "播放线程已退出" : "无新帧"));
+                        d27_log(ctx, "COMPAT", (uint64_t)gen, hbRequestId,
+                                "watchdog stall pid=%d hb_age=%lldms frame_age=%lldms "
+                                "playing=%d transition=%d pause=%d worker_alive=%d "
+                                "action=%s status=kill",
+                                pid, hbAge, frameAge, playing, inTransition,
+                                expPause, workerAlive,
+                                noHeartbeat ? "no_heartbeat" :
+                                (workerDead ? "worker_dead" : "no_frame"));
                         kill((pid_t)pid, SIGKILL);
                         ctx->watchdogKilledGeneration = gen;
                     }
@@ -929,18 +979,9 @@ static void *watchdog_thread(void *arg) {
                     ctx->healthBaselineFrames = hbVideoFrames;
                 } else if (!ctx->healthHintShown && hbVideoFrames > ctx->healthBaselineFrames &&
                            (now - ctx->healthBaselineMs >= healthWindowMs || healthForce)) {
-                    char run[SL_META_FIELD_MAX] = {0};
-                    char session[SL_META_FIELD_MAX] = {0};
-                    pthread_mutex_lock(&ctx->daemonMutex);
-                    snprintf(run, sizeof(run), "%s", ctx->sessionMeta.run);
-                    snprintf(session, sizeof(session), "%s", ctx->sessionMeta.session);
-                    pthread_mutex_unlock(&ctx->daemonMutex);
-                    fprintf(stderr,
-                            "[mpv-compat][health] run=%s session=%s gen=%llu "
-                            "req=%llu stall detected: present=%.0f base=%.0f queue=%u frames=%d "
-                            "frame_age=%lld net_age=%lld force=%d -> hint shown\n",
-                            run, session, (unsigned long long)fileGen,
-                            (unsigned long long)hbRequestId,
+                    d27_log(ctx, "COMPAT", (uint64_t)fileGen, hbRequestId,
+                            "health stall detected present=%.0f base=%.0f queue=%u "
+                            "frames=%d frame_age=%lld net_age=%lld force=%d -> hint shown",
                             hbPresentationMs, ctx->healthBaselinePresentationMs,
                             hbQueueMs, hbVideoFrames, frameAge,
                             hbNetErrorAgeMs, healthForce ? 1 : 0);
@@ -954,7 +995,7 @@ static void *watchdog_thread(void *arg) {
             usleep((useconds_t)(pollMs * 1000));
         }
     }
-    fprintf(stderr, "[mpv-compat] watchdog 退出\n");
+    d27_log(ctx, "COMPAT", 0, 0, "watchdog exit");
     return NULL;
 }
 
@@ -965,13 +1006,13 @@ static void *watchdog_thread(void *arg) {
  * 逐帧 getenv("SL_TRANSPARENT")，所以同进程内 setenv/unsetenv 当场生效，
  * 不需要重编 UI、也不需要额外 IPC。语义上只在「播放页」透明：
  * 首页/详情页保持不透明，避免露出没有视频的空视频平面（会呈黑底）。 */
-static void transparency_enable(void) {
+static void transparency_enable(mpv_handle *ctx) {
     setenv("SL_TRANSPARENT", "1", 1);
-    fprintf(stderr, "[mpv-compat] 播放页透明开启（UI clear alpha=0）\n");
+    d27_log(ctx, "COMPAT", 0, 0, "transparent on");
 }
-static void transparency_disable(void) {
+static void transparency_disable(mpv_handle *ctx) {
     unsetenv("SL_TRANSPARENT");
-    fprintf(stderr, "[mpv-compat] 透明关闭（UI 恢复不透明）\n");
+    d27_log(ctx, "COMPAT", 0, 0, "transparent off");
 }
 
 /* 主源播放失败 → 依次尝试 wiliwili 追加的备用源（等价 mpv playlist 换项）。
@@ -1012,7 +1053,8 @@ static int try_failover(mpv_handle *ctx) {
     pthread_mutex_unlock(&ctx->daemonMutex);
     clear_queued_events(ctx);
     reset_props_for_new_file(ctx, "");
-    fprintf(stderr, "[mpv-compat] 主源失败，切换备用源: gen=%llu req=%llu（剩余 %d）\n",
+    d27_log(ctx, "COMPAT", failoverGen, failoverReq,
+            "failover to backup gen=%llu req=%llu remaining=%d",
             (unsigned long long)failoverGen, (unsigned long long)failoverReq,
             ctx->backupCount);
     send_session_meta_and_open(ctx, failoverGen, failoverReq, openCmd);
@@ -1042,7 +1084,6 @@ static void *rx_thread(void *arg) {
         const char *evt = fields[0];
         uint64_t evtGen = strtoull(fields[SL_IPC_FRAME_FILE_GEN_FIELD], NULL, 10);
         uint64_t evtReq = strtoull(fields[SL_IPC_FRAME_REQUEST_FIELD], NULL, 10);
-        (void)evtReq; /* 当前兼容层按事件类型消费，请求号用于 daemon 回传链自检 */
         uint64_t currentGen = 0;
         pthread_mutex_lock(&ctx->daemonMutex);
         currentGen = ctx->fileGeneration;
@@ -1050,9 +1091,8 @@ static void *rx_thread(void *arg) {
         if (evtGen != currentGen) {
             if (strcmp(evt, SL_EVT_PROGRESS) != 0 &&
                 strcmp(evt, SL_EVT_HEARTBEAT) != 0) {
-                fprintf(stderr,
-                        "[mpv-compat] 丢弃过期文件事件: %s gen=%llu current=%llu\n",
-                        evt, (unsigned long long)evtGen,
+                d27_log(ctx, "COMPAT", evtGen, evtReq,
+                        "drop stale event=%s current_gen=%llu", evt,
                         (unsigned long long)currentGen);
             }
             continue;
@@ -1075,6 +1115,7 @@ static void *rx_thread(void *arg) {
             if (!suppress) {
                 mpv_event *e = alloc_event(ctx, MPV_EVENT_FILE_LOADED); (void)e;
             }
+            d27_log(ctx, "EVT", evtGen, evtReq, "opened duration=%.3f status=ok", dur);
         } else if (strcmp(evt, SL_EVT_PLAYBACK_START) == 0) {
             int *idle = malloc(sizeof(int)); *idle = 0;
             update_prop_and_notify(ctx, "core-idle", MPV_FORMAT_FLAG, idle);
@@ -1089,6 +1130,7 @@ static void *rx_thread(void *arg) {
             ctx->restorePausePending = 0;
             pthread_mutex_unlock(&ctx->daemonMutex);
             if (restorePause) send_context_cmd(ctx, SL_CMD_PAUSE, "");
+            d27_log(ctx, "EVT", evtGen, evtReq, "playback start status=ok");
         } else if (strcmp(evt, SL_EVT_PROGRESS) == 0) {
             double pos = nf >= 4 ? atof(fields[3]) : 0.0;
             double dur = nf >= 5 ? atof(fields[4]) : 0.0;
@@ -1108,6 +1150,7 @@ static void *rx_thread(void *arg) {
              * 不看 pause 属性；暂停时同步置 true 才能显示播放三角。 */
             v = malloc(sizeof(int)); *v = 1;
             update_prop_and_notify(ctx, "core-idle", MPV_FORMAT_FLAG, v);
+            d27_log(ctx, "EVT", evtGen, evtReq, "paused status=ok");
         } else if (strcmp(evt, SL_EVT_RESUMED) == 0) {
             int *v = malloc(sizeof(int)); *v = 0;
             update_prop_and_notify(ctx, "pause", MPV_FORMAT_FLAG, v);
@@ -1116,6 +1159,7 @@ static void *rx_thread(void *arg) {
             pthread_mutex_lock(&ctx->daemonMutex);
             ctx->lastResumeMs = monotonicMs();
             pthread_mutex_unlock(&ctx->daemonMutex);
+            d27_log(ctx, "EVT", evtGen, evtReq, "resumed status=ok");
         } else if (strcmp(evt, SL_EVT_SEEKED) == 0) {
             double pos = nf >= 4 ? atof(fields[3]) : 0.0;
             double dur = 0.0;
@@ -1135,6 +1179,8 @@ static void *rx_thread(void *arg) {
             ctx->resumePosition = pos;
             ctx->lastResumeMs = monotonicMs();
             pthread_mutex_unlock(&ctx->daemonMutex);
+            d27_log(ctx, "EVT", evtGen, evtReq,
+                    "seeked position=%.3f status=ok", pos);
         } else if (strcmp(evt, SL_EVT_EOF) == 0) {
             int *v = malloc(sizeof(int)); *v = 1;
             update_prop_and_notify(ctx, "eof-reached", MPV_FORMAT_FLAG, v);
@@ -1156,15 +1202,16 @@ static void *rx_thread(void *arg) {
             ctx->hasInitialSeekTarget = 0;
             pthread_mutex_unlock(&ctx->daemonMutex);
             /* 播放结束：恢复不透明，避免 UI 透出没有视频的空视频平面（黑底） */
-            transparency_disable();
+            transparency_disable(ctx);
+            d27_log(ctx, "EVT", evtGen, evtReq, "eof status=ok");
         } else if (strcmp(evt, SL_EVT_ERROR) == 0 || strcmp(evt, SL_EVT_FATAL) == 0) {
             /* FrameSubmitStalled 只是送帧停滞的上报，播放器仍在尝试恢复。
              * 不能把它当播放结束，否则每次 fatal 都会关闭透明层并让 watchdog
              * 停止工作，用户看到白屏而底层继续空转。 */
             if (strcmp(evt, SL_EVT_FATAL) == 0 && nf >= 4 &&
                 strcmp(fields[3], "FrameSubmitStalled") == 0) {
-                fprintf(stderr,
-                        "[mpv-compat] 忽略 FrameSubmitStalled，保留透明层并让 watchdog 继续判定\n");
+                d27_log(ctx, "COMPAT", evtGen, evtReq,
+                        "ignore FrameSubmitStalled, keep watchdog active");
                 continue;
             }
             /* 主源失败先试备用源；全失败才向 wiliwili 报 END_FILE(ERROR) */
@@ -1181,7 +1228,7 @@ static void *rx_thread(void *arg) {
             ctx->hasLastOpen = 0;
             ctx->hasInitialSeekTarget = 0;
             pthread_mutex_unlock(&ctx->daemonMutex);
-            transparency_disable();
+            transparency_disable(ctx);
             mpv_event *e = alloc_event(ctx, MPV_EVENT_END_FILE);
             if (e) {
                 mpv_event_end_file *end = calloc(1, sizeof(mpv_event_end_file));
@@ -1189,6 +1236,8 @@ static void *rx_thread(void *arg) {
                 end->error = MPV_ERROR_GENERIC;
                 e->data = end;
             }
+            d27_log(ctx, "EVT", evtGen, evtReq, "error status=ok detail=%s",
+                    nf >= 4 ? fields[3] : evt);
         } else if (strcmp(evt, SL_EVT_HEARTBEAT) == 0) {
             /* 心跳只喂 watchdog，不给 UI 生成事件，避免250/500ms 级 wakeup 洪泛。 */
             if (nf >= 12) {
@@ -1247,6 +1296,7 @@ mpv_handle *mpv_create(void) {
     pthread_mutex_init(&ctx->obsMutex, NULL);
     pthread_mutex_init(&ctx->propMutex, NULL);
     pthread_mutex_init(&ctx->txMutex, NULL);
+    pthread_mutex_init(&ctx->metaMutex, NULL);
     ctx->backupCount = 0;
     ctx->volume = 100;
     ctx->speed = 1.0;
@@ -1271,7 +1321,7 @@ int mpv_initialize(mpv_handle *ctx) {
     ctx->rxRunning = 1;
     if (pthread_create(&ctx->rxThread, NULL, rx_thread, ctx) != 0) {
         ctx->rxRunning = 0;
-        fprintf(stderr, "[mpv-compat] 接收线程创建失败\n");
+        d27_log(ctx, "COMPAT", 0, 0, "rx thread create failed");
         send_context_cmd(ctx, SL_CMD_QUIT, "");
         pthread_mutex_lock(&ctx->daemonMutex);
         reap_daemon_locked(ctx, "initialize-failed", DAEMON_REAP_TERMINATE_MS);
@@ -1284,7 +1334,8 @@ int mpv_initialize(mpv_handle *ctx) {
     ctx->watchdogRunning = 1;
     if (pthread_create(&ctx->watchdogThread, NULL, watchdog_thread, ctx) != 0) {
         ctx->watchdogRunning = 0;
-        fprintf(stderr, "[mpv-compat] watchdog 线程创建失败，继续无 watchdog 运行\n");
+        d27_log(ctx, "COMPAT", 0, 0,
+                "watchdog thread create failed, continue without watchdog");
     } else {
         ctx->watchdogThreadCreated = 1;
     }
@@ -1293,7 +1344,7 @@ int mpv_initialize(mpv_handle *ctx) {
 
 void mpv_terminate_destroy(mpv_handle *ctx) {
     if (!ctx) return;
-    transparency_disable(); /* 进程退出前恢复不透明，避免残留透明状态影响下次 UI */
+    transparency_disable(ctx); /* 进程退出前恢复不透明 */
 
     pthread_mutex_lock(&ctx->daemonMutex);
     ctx->shuttingDown = 1;
@@ -1334,6 +1385,7 @@ void mpv_terminate_destroy(mpv_handle *ctx) {
     pthread_mutex_destroy(&ctx->obsMutex);
     pthread_mutex_destroy(&ctx->propMutex);
     pthread_mutex_destroy(&ctx->txMutex);
+    pthread_mutex_destroy(&ctx->metaMutex);
     free(ctx);
 }
 
@@ -1428,7 +1480,7 @@ static void build_open_cmd(const char *url, const char *method, const char *extr
 
 /* 命令审计日志：把 wiliwili 实际下发的命令序列打出来，便于对照 mpv 语义排错。
  * 限长拼接，避免超长 URL 刷屏和无谓的 -Wformat-truncation 告警。 */
-static void log_command(const char **args) {
+static void log_command(mpv_handle *ctx, const char **args) {
     char dbg[192];
     size_t off = 0;
     dbg[0] = '\0';
@@ -1438,17 +1490,23 @@ static void log_command(const char **args) {
         while (*s && off + 1 < sizeof(dbg)) dbg[off++] = *s++;
         dbg[off] = '\0';
     }
-    fprintf(stderr, "[mpv-compat] cmd: %s\n", dbg);
+    uint64_t gen = 0, req = 0;
+    pthread_mutex_lock(&ctx->daemonMutex);
+    gen = ctx->fileGeneration;
+    req = ctx->lastCommandReq;
+    pthread_mutex_unlock(&ctx->daemonMutex);
+    d27_log(ctx, "CMD", gen, req, "command %s", dbg);
 }
 
 /* 生命周期边界日志：与 daemon/SlPlayer 的单调时钟同尺度，便于对齐 VPU 调用顺序。 */
-static void lifecycle_log(const char *fmt, ...) {
+static void lifecycle_log(mpv_handle *ctx, uint64_t gen, uint64_t req,
+                          const char *fmt, ...) {
+    char message[1024];
     va_list args;
     va_start(args, fmt);
-    fprintf(stderr, "[mpv-compat][life] %lld ", monotonicMs());
-    vfprintf(stderr, fmt, args);
-    fputc('\n', stderr);
+    vsnprintf(message, sizeof(message), fmt, args);
     va_end(args);
+    d27_log(ctx, "COMPAT", gen, req, "%s", message);
 }
 
 /* D27 日志脱敏：URL 只保留 '?' 前的静态路径文件名；extra 只保留键名。
@@ -1499,9 +1557,10 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
     if (!ctx || !args || !args[0]) return MPV_ERROR_INVALID_PARAMETER;
     const char *cmd = args[0];
 
-    if (strcmp(cmd, "loadfile") != 0 && strcmp(cmd, "show-text") != 0 &&
-        strcmp(cmd, "change-list") != 0)
-        log_command(args);
+    if (strcmp(cmd, "loadfile") != 0 && strcmp(cmd, "set") != 0 &&
+        strcmp(cmd, "stop") != 0 && strcmp(cmd, "quit") != 0 &&
+        strcmp(cmd, "show-text") != 0 && strcmp(cmd, "change-list") != 0)
+        log_command(ctx, args);
 
     if (strcmp(cmd, "loadfile") == 0) {
         /* args: loadfile, url, method, [0,] [extra] */
@@ -1519,6 +1578,7 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
         pthread_mutex_lock(&ctx->daemonMutex);
         uint64_t openGen = ctx->fileGeneration;
         uint64_t openReq = ++ctx->requestSeq;
+        ctx->lastCommandReq = openReq;
         pthread_mutex_unlock(&ctx->daemonMutex);
         char frame[65536];
         /* build_open_cmd() 的首字段已是 "open"，信封只保留一次命令名。 */
@@ -1540,7 +1600,8 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
             pthread_mutex_unlock(&ctx->txMutex);
             char safeUrl[160];
             safe_url_for_log(url, safeUrl, sizeof(safeUrl));
-            fprintf(stderr, "[mpv-compat] 备用源入队(%d): %s\n", queued, safeUrl);
+            d27_log(ctx, "COMPAT", openGen, openReq,
+                    "backup queued count=%d url=%s", queued, safeUrl);
             return MPV_ERROR_SUCCESS;
         }
         /* replace：新的主源，清空旧备用队列，并进入播放页透明模式 */
@@ -1551,6 +1612,7 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
         ctx->fileGeneration++;
         openGen = ctx->fileGeneration;
         openReq = ++ctx->requestSeq;
+        ctx->lastCommandReq = openReq;
         pthread_mutex_unlock(&ctx->daemonMutex);
         snprintf(frame, sizeof(frame), "%s\t%llu\t%llu\t%s", SL_CMD_OPEN,
                  (unsigned long long)openGen, (unsigned long long)openReq,
@@ -1566,23 +1628,28 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
         ctx->initialSeekTarget = ctx->resumePosition;
         ctx->hasInitialSeekTarget = ctx->initialSeekTarget > 0.0;
         ctx->lastResumeMs = monotonicMs();
+        pthread_mutex_lock(&ctx->metaMutex);
         ctx->sessionMeta = session;
         ctx->hasSessionMeta = hasSession;
+        pthread_mutex_unlock(&ctx->metaMutex);
         pthread_mutex_unlock(&ctx->daemonMutex);
         clear_queued_events(ctx);
         reset_props_for_new_file(ctx, url);
-        transparency_enable();
-        lifecycle_log("loadfile replace gen=%llu req=%llu playbackActive=%d send open",
-                      (unsigned long long)openGen, (unsigned long long)openReq,
+        transparency_enable(ctx);
+        lifecycle_log(ctx, openGen, openReq,
+                      "loadfile replace playbackActive=%d send open",
                       ctx->playbackActive);
-        const char *mediaTag = getenv("SL_MEDIA_TAG");
         char safeUrl[160], safeKeys[256];
         safe_url_for_log(url, safeUrl, sizeof(safeUrl));
         safe_extra_keys_for_log(extra, safeKeys, sizeof(safeKeys));
-        fprintf(stderr,
-                "[mpv-compat] loadfile: gen=%llu req=%llu tag=%s url=%s extra_keys=%s\n",
-                (unsigned long long)openGen, (unsigned long long)openReq,
-                mediaTag ? mediaTag : "-", safeUrl, safeKeys);
+        d27_log(ctx, "COMPAT", openGen, openReq,
+                "loadfile url=%s extra_keys=%s content=%s id=%s bv=%s cid=%s qn=%s",
+                safeUrl, safeKeys,
+                hasSession && session.content[0] ? session.content : "-",
+                hasSession && session.id[0] ? session.id : "-",
+                hasSession && session.bv[0] ? session.bv : "-",
+                hasSession && session.cid[0] ? session.cid : "-",
+                hasSession && session.qn[0] ? session.qn : "-");
         return send_session_meta_and_open(ctx, openGen, openReq, frame);
     }
     if (strcmp(cmd, "set") == 0) {
@@ -1595,7 +1662,15 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
             ctx->expectedPause = yes;
             if (!yes) ctx->lastResumeMs = monotonicMs();
             pthread_mutex_unlock(&ctx->daemonMutex);
-            return send_context_cmd(ctx, yes ? SL_CMD_PAUSE : SL_CMD_RESUME, "");
+            int rc = send_context_cmd(ctx, yes ? SL_CMD_PAUSE : SL_CMD_RESUME, "");
+            uint64_t pauseGen = 0, pauseReq = 0;
+            pthread_mutex_lock(&ctx->daemonMutex);
+            pauseGen = ctx->fileGeneration;
+            pauseReq = ctx->lastCommandReq;
+            pthread_mutex_unlock(&ctx->daemonMutex);
+            d27_log(ctx, "CMD", pauseGen, pauseReq,
+                    "set pause=%s status=sent", yes ? "yes" : "no");
+            return rc;
         }
         if (strcmp(prop, "volume") == 0) {
             return send_context_cmd(ctx, SL_CMD_VOLUME, "%s", val);
@@ -1645,16 +1720,21 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
         ctx->lastResumeMs = monotonicMs();
         pthread_mutex_unlock(&ctx->daemonMutex);
         if (duplicate) {
-            fprintf(stderr,
-                    "[mpv-compat] seek 与 start= 等价，跳过重复定位: %.3f s\n",
-                    target);
+            d27_log(ctx, "CMD", ctx->fileGeneration, 0,
+                    "seek target=%.3f status=duplicate", target);
             return MPV_ERROR_SUCCESS;
         }
 
         int *v = malloc(sizeof(int)); *v = 1;
         update_prop_and_notify(ctx, "seeking", MPV_FORMAT_FLAG, v);
         int rc = send_context_cmd(ctx, SL_CMD_SEEK, "%.3f", target);
-        fprintf(stderr, "[mpv-compat] seek %s -> %.3f s (current=%.3f duration=%.3f)\n",
+        uint64_t seekGen = 0, seekReq = 0;
+        pthread_mutex_lock(&ctx->daemonMutex);
+        seekGen = ctx->fileGeneration;
+        seekReq = ctx->lastCommandReq;
+        pthread_mutex_unlock(&ctx->daemonMutex);
+        d27_log(ctx, "CMD", seekGen, seekReq,
+                "seek mode=%s target=%.3f current=%.3f duration=%.3f status=sent",
                 mode, target, current, duration);
         if (rc != MPV_ERROR_SUCCESS) {
             v = malloc(sizeof(int)); *v = 0;
@@ -1671,12 +1751,15 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
         int dropped = ctx->backupCount;
         ctx->backupCount = 0;
         pthread_mutex_unlock(&ctx->txMutex);
-        fprintf(stderr, "[mpv-compat] playlist-clear：丢弃 %d 个备用源，当前播放继续\n", dropped);
+        d27_log(ctx, "COMPAT", ctx->fileGeneration, ctx->lastCommandReq,
+                "playlist clear dropped=%d current playback continues", dropped);
         return MPV_ERROR_SUCCESS;
     }
     if (strcmp(cmd, "stop") == 0) {
-        lifecycle_log("stop enter gen=%llu playbackActive=%d",
-                      (unsigned long long)ctx->fileGeneration, ctx->playbackActive);
+        uint64_t stopGen = ctx->fileGeneration;
+        uint64_t stopReq = ctx->lastCommandReq;
+        lifecycle_log(ctx, stopGen, stopReq,
+                      "stop enter playbackActive=%d", ctx->playbackActive);
         pthread_mutex_lock(&ctx->txMutex);
         ctx->backupCount = 0;
         pthread_mutex_unlock(&ctx->txMutex);
@@ -1694,14 +1777,15 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
         update_prop_and_notify(ctx, "core-idle", MPV_FORMAT_FLAG, idle);
         int *seekingOff = malloc(sizeof(int)); *seekingOff = 0;
         update_prop_and_notify(ctx, "seeking", MPV_FORMAT_FLAG, seekingOff);
-        transparency_disable(); /* 离开播放：恢复不透明 UI */
-        lifecycle_log("stop done rc=%d gen=%llu", rc,
-                      (unsigned long long)ctx->fileGeneration);
+        transparency_disable(ctx); /* 离开播放：恢复不透明 UI */
+        lifecycle_log(ctx, ctx->fileGeneration, stopReq,
+                      "stop done rc=%d", rc);
         return rc;
     }
     if (strcmp(cmd, "quit") == 0) {
-        lifecycle_log("quit enter gen=%llu", (unsigned long long)ctx->fileGeneration);
-        transparency_disable();
+        lifecycle_log(ctx, ctx->fileGeneration, ctx->lastCommandReq,
+                      "quit enter");
+        transparency_disable(ctx);
         return send_context_cmd(ctx, SL_CMD_QUIT, "");
     }
     /* show-text / change-list / no-osd 等 UI 类命令：忽略 */

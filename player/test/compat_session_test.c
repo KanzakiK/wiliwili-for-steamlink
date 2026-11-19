@@ -93,6 +93,7 @@ int main(int argc, char **argv) {
     const char *extra =
         "referrer=\"https://www.bilibili.com/\",start=0,"
         "run=compat-probe,session=compat-probe-1,content=video,id=BVTEST,"
+        "bv=BVTEST,cid=43208345449,qn=64,"
         "audio-file=\"https://example.invalid/a.m4s?upsig=SECRET_SHOULD_NOT_LOG\"";
     const char *args[] = {
         "loadfile",

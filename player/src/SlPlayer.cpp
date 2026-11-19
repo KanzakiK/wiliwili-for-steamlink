@@ -61,7 +61,7 @@ bool stopDebugEnabled() {
 
 void stopLog(const char* stage) {
     if (stopDebugEnabled())
-        fprintf(stderr, "[SlPlayer][stop] %s\n", stage);
+        sl::d27Log("PLAYER", "stop stage=%s", stage);
 }
 
 bool syncDebugEnabled() {
@@ -72,12 +72,12 @@ bool syncDebugEnabled() {
 void syncLog(const char* fmt, ...) {
     if (!syncDebugEnabled())
         return;
+    char message[1024];
     va_list args;
     va_start(args, fmt);
-    fprintf(stderr, "[SlPlayer][sync] ");
-    vfprintf(stderr, fmt, args);
-    fprintf(stderr, "\n");
+    std::vsnprintf(message, sizeof(message), fmt, args);
     va_end(args);
+    sl::d27Log("PLAYER", "sync %s", message);
 }
 
 double meanFps(AVRational rate) {
@@ -119,12 +119,12 @@ std::int64_t steadyNowMs() {
 /* VPU 生命周期日志：只在 open/stop/CreateStream/FreeStream 边界输出，
  * 用来对照切清晰度与退出时的驱动调用顺序，不进入逐帧路径。 */
 void vpuLog(const char* fmt, ...) {
+    char message[1024];
     va_list args;
     va_start(args, fmt);
-    fprintf(stderr, "[SlPlayer][vpu] %lld ", (long long)steadyNowMs());
-    vfprintf(stderr, fmt, args);
-    fputc('\n', stderr);
+    std::vsnprintf(message, sizeof(message), fmt, args);
     va_end(args);
+    sl::d27Log("PLAYER", "vpu %lld %s", (long long)steadyNowMs(), message);
 }
 
 /* ---- Dirty Flag 辅助（文件 I/O 只做标记，不碰 VPU）---- */
@@ -138,15 +138,15 @@ void writeDirtyFlag() {
         std::fprintf(f, "SlPlayer VPU session in progress\n");
         std::fclose(f);
     } else {
-        fprintf(stderr, "[SlPlayer] 警告：无法写 VPU 脏标记 %s\n",
-                kVpuDirtyFlagPath);
+        sl::d27Log("PLAYER", "warn dirty flag write failed path=%s",
+                   kVpuDirtyFlagPath);
     }
 }
 
 void clearDirtyFlag() {
     if (std::remove(kVpuDirtyFlagPath) != 0 && errno != ENOENT) {
-        fprintf(stderr, "[SlPlayer] 警告：无法清除 VPU 脏标记 %s\n",
-                kVpuDirtyFlagPath);
+        sl::d27Log("PLAYER", "warn dirty flag clear failed path=%s",
+                   kVpuDirtyFlagPath);
     }
 }
 
@@ -194,7 +194,7 @@ struct Player::Impl {
     bool start(const SourceSpec& spec) {
         if (thread.joinable() &&
             std::this_thread::get_id() == thread.get_id()) {
-            fprintf(stderr, "[SlPlayer] 不能在事件回调里重新 open\n");
+            sl::d27Log("PLAYER", "open rejected from event callback");
             return false;
         }
 
@@ -244,10 +244,10 @@ struct Player::Impl {
             try {
                 run();
             } catch (const std::exception& e) {
-                fprintf(stderr, "[SlPlayer] 播放线程异常: %s\n", e.what());
+                sl::d27Log("PLAYER", "playback thread exception %s", e.what());
                 running_ = false;
             } catch (...) {
-                fprintf(stderr, "[SlPlayer] 播放线程未知异常\n");
+                sl::d27Log("PLAYER", "playback thread unknown exception");
                 running_ = false;
             }
         });
@@ -404,9 +404,9 @@ struct Player::Impl {
         try {
             cb(event);
         } catch (const std::exception& e) {
-            fprintf(stderr, "[SlPlayer] 事件回调抛异常: %s\n", e.what());
+            sl::d27Log("PLAYER", "event callback exception %s", e.what());
         } catch (...) {
-            fprintf(stderr, "[SlPlayer] 事件回调抛未知异常\n");
+            sl::d27Log("PLAYER", "event callback unknown exception");
         }
     }
 
@@ -423,16 +423,16 @@ struct Player::Impl {
             std::lock_guard<std::mutex> lock(mutex);
             cb = fatalCallback;
         }
-        fprintf(stderr, "[SlPlayer] VPU 致命错误: %s - %s\n",
-                fatalTypeName(type), message.c_str());
+        sl::d27Log("PLAYER", "fatal type=%s message=%s",
+                   fatalTypeName(type), message.c_str());
         if (!cb)
             return;
         try {
             cb(type, message);
         } catch (const std::exception& e) {
-            fprintf(stderr, "[SlPlayer] fatal 回调抛异常: %s\n", e.what());
+            sl::d27Log("PLAYER", "fatal callback exception %s", e.what());
         } catch (...) {
-            fprintf(stderr, "[SlPlayer] fatal 回调抛未知异常\n");
+            sl::d27Log("PLAYER", "fatal callback unknown exception");
         }
     }
 
@@ -553,11 +553,10 @@ void Player::Impl::run() {
             spsTargetBuffering = buffering;
         }
     }
-    fprintf(stderr,
-            "[SlPlayer] SPS 策略: refs<=%d reorder=%s buffering=%s rewrite=%s\n",
-            spsTargetRefs, spsTargetReorder < 0 ? "keep" : "clamp",
-            spsTargetBuffering < 0 ? "keep" : "clamp",
-            enableRewrite ? "on" : "off");
+    sl::d27Log("PLAYER", "sps policy refs<=%d reorder=%s buffering=%s rewrite=%s",
+               spsTargetRefs, spsTargetReorder < 0 ? "keep" : "clamp",
+               spsTargetBuffering < 0 ? "keep" : "clamp",
+               enableRewrite ? "on" : "off");
     bool videoStarted = false;
     bool afterSeek = false;
     bool audioScheduled = false;
@@ -655,17 +654,15 @@ void Player::Impl::run() {
      */
     bool wasDirty = dirtyFlagPresent();
     if (wasDirty) {
-        fprintf(stderr,
-                "[SlPlayer] 检测到 VPU 脏标记，先执行启动前清洗\n");
+        sl::d27Log("PLAYER", "dirty flag detected, pre-clean");
         CSLVideoContext* probe = SLVideo_CreateContext();
         if (probe) {
             SLVideo_FreeContext(probe);
             std::this_thread::sleep_for(
                 std::chrono::milliseconds(kVpuCleanupDelayMs));
-            fprintf(stderr, "[SlPlayer] 启动前清洗完成\n");
+            sl::d27Log("PLAYER", "pre-clean done");
         } else {
-            fprintf(stderr,
-                    "[SlPlayer] 清洗时 CreateContext 失败，仍继续正式起调\n");
+            sl::d27Log("PLAYER", "pre-clean CreateContext failed, continue");
         }
     }
     writeDirtyFlag();
@@ -677,9 +674,8 @@ void Player::Impl::run() {
         if (videoContext)
             break;
         if (attempt < kVpuInitRetryCount) {
-            fprintf(stderr,
-                    "[SlPlayer] CreateContext 失败，%dms 后复位重试 (%d/%d)\n",
-                    kVpuInitRetryDelayMs, attempt + 1, kVpuInitRetryCount);
+            sl::d27Log("PLAYER", "CreateContext failed, retry %d/%d after %dms",
+                       attempt + 1, kVpuInitRetryCount, kVpuInitRetryDelayMs);
             std::this_thread::sleep_for(
                 std::chrono::milliseconds(kVpuInitRetryDelayMs));
         }
@@ -728,10 +724,10 @@ void Player::Impl::run() {
         info_.fps = fps;
         info_.duration = duration;
     }
-    fprintf(stderr,
-            "[SlPlayer][media] %s audio=%zu duration=%.3f %dx%d fps=%.3f\n",
-            sourceTag(spec.videoUrl).c_str(), spec.audioUrls.size(), duration,
-            info_.width, info_.height, fps);
+    sl::d27LogIdentity("PLAYER",
+                       "media %s audio=%zu duration=%.3f %dx%d fps=%.3f",
+                       sourceTag(spec.videoUrl).c_str(), spec.audioUrls.size(),
+                       duration, info_.width, info_.height, fps);
     /* 前置 SPS 门禁：只降 refs，默认保留 reorder/buffering。
      * 实测 7->4 refs 可避免高参考帧片源在 seek 后 VDEC SHM 分配失败；
      * 同时压低 reorder/buffering 会截断 B 帧重排，出现花屏/抽动。 */
@@ -742,7 +738,7 @@ void Player::Impl::run() {
         H264SpsInfo sps = parseAvcC(stream->codecpar->extradata,
                                     (size_t)stream->codecpar->extradata_size);
         if (!sps.valid) {
-            fprintf(stderr, "[SlPlayer] SPS 解析失败（继续尝试播放）\n");
+            sl::d27Log("PLAYER", "SPS parse failed, continue");
         } else {
             effectiveSpsReorder = spsTargetReorder < 0
                                       ? sps.reorder
@@ -754,14 +750,14 @@ void Player::Impl::run() {
             needSpsRewrite = sps.refs > spsTargetRefs ||
                              effectiveSpsReorder < sps.reorder ||
                              effectiveSpsBuffering < sps.buffering;
-            fprintf(stderr,
-                    "[SlPlayer] SPS: refs=%d reorder=%d buffering=%d target=%d/%d/%d need=%d rewrite=%d\n",
-                    sps.refs, sps.reorder, sps.buffering,
-                    spsTargetRefs, effectiveSpsReorder, effectiveSpsBuffering,
-                    needSpsRewrite ? 1 : 0,
-                    enableRewrite ? 1 : 0);
+            sl::d27Log("PLAYER",
+                       "SPS refs=%d reorder=%d buffering=%d target=%d/%d/%d "
+                       "need=%d rewrite=%d",
+                       sps.refs, sps.reorder, sps.buffering,
+                       spsTargetRefs, effectiveSpsReorder, effectiveSpsBuffering,
+                       needSpsRewrite ? 1 : 0, enableRewrite ? 1 : 0);
             if (!enableRewrite && needSpsRewrite) {
-                fprintf(stderr, "[SlPlayer] 高参考帧码流，SPS 改写已由 SL_SPS_REWRITE=0 关闭\n");
+                sl::d27Log("PLAYER", "SPS rewrite disabled by SL_SPS_REWRITE=0");
             }
         }
 
@@ -783,20 +779,19 @@ void Player::Impl::run() {
                     shutdown();
                     return;
                 }
-                fprintf(stderr, "[SlPlayer] 默认 SPS 改写失败，继续原始码流\n");
+                sl::d27Log("PLAYER", "SPS rewrite failed, use original stream");
             } else {
                 rewriteSps = true;
                 H264SpsInfo patched = parseAvcC(patchedExtradata.data(),
                                                 patchedExtradata.size());
-                fprintf(stderr,
-                        "[SlPlayer] SPS 已改写: refs %d->%d, reorder %d->%d, "
-                        "buffering %d->%d\n",
-                        sps.refs, patched.refs, sps.reorder, patched.reorder,
-                        sps.buffering, patched.buffering);
+                sl::d27Log("PLAYER",
+                           "SPS rewritten refs %d->%d reorder %d->%d buffering %d->%d",
+                           sps.refs, patched.refs, sps.reorder, patched.reorder,
+                           sps.buffering, patched.buffering);
             }
         }
     } else {
-        fprintf(stderr, "[SlPlayer] 无 extradata，跳过 SPS 门禁\n");
+        sl::d27Log("PLAYER", "no extradata, skip SPS gate");
     }
 
     emit(EventType::Opened);
@@ -842,9 +837,8 @@ void Player::Impl::run() {
         if (videoStream)
             break;
         if (attempt < kVpuInitRetryCount) {
-            fprintf(stderr,
-                    "[SlPlayer] CreateStream 失败，复位重试 (%d/%d)\n",
-                    attempt + 1, kVpuInitRetryCount);
+            sl::d27Log("PLAYER", "CreateStream failed, retry %d/%d",
+                       attempt + 1, kVpuInitRetryCount);
             if (videoContext) {
                 SLVideo_FreeContext(videoContext);
                 videoContext = nullptr;
@@ -853,7 +847,7 @@ void Player::Impl::run() {
                 std::chrono::milliseconds(kVpuInitRetryDelayMs));
             videoContext = SLVideo_CreateContext();
             if (!videoContext) {
-                fprintf(stderr, "[SlPlayer] 复位时 CreateContext 也失败\n");
+                sl::d27Log("PLAYER", "CreateContext failed during reset");
                 break;
             }
         }
@@ -872,7 +866,7 @@ void Player::Impl::run() {
          * 都已在真机上复现问题，这里保持 SDK 默认值。 */
     };
     applyStreamParams();
-    fprintf(stderr, "[SlPlayer] SLVideo stream 就绪\n");
+    sl::d27Log("PLAYER", "SLVideo stream ready");
 
     /*
      * 重建 stream 前的清理间隔：seek/pause 都是 FreeStream → CreateStream，
@@ -925,18 +919,18 @@ void Player::Impl::run() {
 
     /* 独立音轨（DASH）：主地址失败时顺序尝试备份地址 */
     if (spec.disableAudio) {
-        fprintf(stderr, "[SlPlayer] disableAudio=1，跳过音频\n");
+        sl::d27Log("AUDIO", "disabled by source spec, skip");
     } else if (!spec.audioUrls.empty()) {
         audioContext = SLAudio_CreateContext();
         bool opened = false;
         for (const std::string& url : spec.audioUrls) {
-            fprintf(stderr, "[SlPlayer] 打开音频源: %.80s...\n", url.c_str());
+            sl::d27Log("AUDIO", "open source %s", sourceTag(url).c_str());
             if (audioSource_.open(url, spec.referrer, userAgent())) {
                 opened = true;
                 break;
             }
-            fprintf(stderr, "[SlPlayer] 音频地址失败: %s\n",
-                    audioSource_.error().c_str());
+            sl::d27Log("AUDIO", "source open failed %s",
+                       audioSource_.error().c_str());
         }
         if (audioContext && opened && audioSource_.audioIndex() >= 0) {
             selfDemux = true;
@@ -957,11 +951,11 @@ void Player::Impl::run() {
         audioContext = nullptr;
     }
     if (!audioReady)
-        fprintf(stderr, "[SlPlayer] 无可用音频，静音播放\n");
+        sl::d27Log("AUDIO", "no usable audio, silent playback");
     else
-        fprintf(stderr, "[SlPlayer] 音频就绪\n");
+        sl::d27Log("AUDIO", "ready");
     audio_.setVolume(volume_.load());
-    fprintf(stderr, "[SlPlayer] 进入播放循环\n");
+    sl::d27Log("PLAYER", "enter playback loop");
 
     auto doSeek = [&](double target, std::uint64_t requestId,
                       bool rebuildVideo = true) -> bool {
@@ -980,8 +974,9 @@ void Player::Impl::run() {
         const double requestedTarget = target;
         lastSeekStartMs = steadyNowMs();
         if (playDiag)
-            fprintf(stderr, "[SlPlayer][diag] seek enter request=%.3f t=%lld\n",
-                    requestedTarget, (long long)lastSeekStartMs);
+            sl::d27LogReq("PLAYER", requestId,
+                          "diag seek enter target=%.3f t=%lld",
+                          requestedTarget, (long long)lastSeekStartMs);
 
         int64_t ts = av_rescale_q((int64_t)(target * AV_TIME_BASE),
                                   AV_TIME_BASE_Q, stream->time_base);
@@ -1009,10 +1004,12 @@ void Player::Impl::run() {
                 av_packet_unref(pendingPacket);
             }
         } else {
-            fprintf(stderr, "[SlPlayer] 视频跳转失败（可能超出缓冲窗口）\n");
+            sl::d27LogReq("PLAYER", requestId,
+                          "video seek failed, possible range window miss");
         }
-        fprintf(stderr, "[SlPlayer] seek: request=%.3f key=%.3f ok=%d\n",
-                requestedTarget, target, ok ? 1 : 0);
+        sl::d27LogReq("PLAYER", requestId,
+                      "video seek target=%.3f key=%.3f ok=%d",
+                      requestedTarget, target, ok ? 1 : 0);
 
         if (audioReady) {
             /* D23：音频 seek 不阻塞视频首帧。音轨 demux/flush/SLAudio stream
@@ -1059,11 +1056,10 @@ void Player::Impl::run() {
         if (requestId == 0 || requestId == latestSeekRequestId_.load())
             emit(EventType::Seeked, std::string(), requestId);
         if (playDiag)
-            fprintf(stderr,
-                    "[SlPlayer][diag] seek return elapsed=%lldms "
-                    "audio_pending=%d\n",
-                    (long long)(steadyNowMs() - lastSeekStartMs),
-                    audioReady && audio_.seekPending() ? 1 : 0);
+            sl::d27LogReq("PLAYER", requestId,
+                          "diag seek return elapsed=%lldms audio_pending=%d",
+                          (long long)(steadyNowMs() - lastSeekStartMs),
+                          audioReady && audio_.seekPending() ? 1 : 0);
         return ok;
     };
 
@@ -1084,17 +1080,19 @@ void Player::Impl::run() {
             auto diagNow = std::chrono::steady_clock::now();
             if (diagNow - lastDiag >= std::chrono::seconds(1)) {
                 lastDiag = diagNow;
-                fprintf(stderr,
-                        "[SlPlayer][diag] stage=%d pos=%.2f vf=%d drop=%d "
-                        "vq=%u net=%lld win=%zu read=%lld base=%lld "
-                        "paused=%d afterSeek=%d awaiting=%d bp=%d\n",
-                        stage_.load(), position_.load(), videoFrames,
-                        droppedFrames_.load(),
-                        videoQueueMs_.load(), videoSource_.downloadedBytes(),
-                        videoSource_.bufferedBytes(), videoSource_.readPosition(),
-                        videoSource_.baseOffset(), paused_.load() ? 1 : 0,
-                        afterSeek ? 1 : 0, awaitingFirstFrame_.load() ? 1 : 0,
-                        backpressure_.load() ? 1 : 0);
+                sl::d27Log("PLAYER",
+                           "diag stage=%d pos=%.2f vf=%d drop=%d vq=%u "
+                           "downloaded=%lld buffered=%lld read=%lld base=%lld "
+                           "paused=%d after_seek=%d awaiting=%d bp=%d",
+                           stage_.load(), position_.load(), videoFrames,
+                           droppedFrames_.load(), videoQueueMs_.load(),
+                           (long long)videoSource_.downloadedBytes(),
+                           (long long)videoSource_.bufferedBytes(),
+                           (long long)videoSource_.readPosition(),
+                           videoSource_.baseOffset(), paused_.load() ? 1 : 0,
+                           afterSeek ? 1 : 0,
+                           awaitingFirstFrame_.load() ? 1 : 0,
+                           backpressure_.load() ? 1 : 0);
             }
         }
         if (pauseFlush_.exchange(false)) {
@@ -1122,7 +1120,7 @@ void Player::Impl::run() {
             pauseFlushed_ = true;
             /* 与 Kodi FlushBuffers 一致：视频队列清空后才停音频。 */
             audio_.setPaused(true);
-            fprintf(stderr, "[SlPlayer] 暂停: 清空视频队列 @ %.2f s\n", at);
+            sl::d27Log("PLAYER", "pause flush video queue at=%.2f", at);
             resumeInProgress_ = false;
             backpressure_ = false;
             if (targetPaused_.load()) {
@@ -1182,8 +1180,8 @@ void Player::Impl::run() {
             char text[128];
             av_strerror(ret, text, sizeof(text));
             if (playDiag)
-                fprintf(stderr, "[SlPlayer][diag] read fail ret=%d %s stage=%d\n",
-                        ret, text, stage_.load());
+                sl::d27Log("PLAYER", "diag read failed ret=%d %s stage=%d",
+                           ret, text, stage_.load());
             fail(std::string("读取失败: ") + text);
             return;
         }
@@ -1216,15 +1214,14 @@ void Player::Impl::run() {
                             if (spsFrameLogs < 3) {
                                 H264SpsInfo frameSps =
                                     parseFirstSpsAnnexB(frameData, (size_t)frameSize);
-                                fprintf(stderr,
-                                        "[SlPlayer] 帧内 SPS: refs=%d reorder=%d "
-                                        "buffering=%d\n",
-                                        frameSps.refs, frameSps.reorder,
-                                        frameSps.buffering);
+                                sl::d27Log("PLAYER",
+                                           "frame SPS refs=%d reorder=%d buffering=%d",
+                                           frameSps.refs, frameSps.reorder,
+                                           frameSps.buffering);
                                 spsFrameLogs++;
                             }
                         } else if (spsFrameLogs < 3) {
-                            fprintf(stderr, "[SlPlayer] 帧内 SPS 改写失败\n");
+                            sl::d27Log("PLAYER", "frame SPS rewrite failed");
                             spsFrameLogs++;
                         }
                     }
@@ -1235,8 +1232,8 @@ void Player::Impl::run() {
                         if (dump) {
                             fwrite(frameData, 1, (size_t)frameSize, dump);
                             fclose(dump);
-                            fprintf(stderr, "[SlPlayer] 首帧已导出: %d 字节\n",
-                                    frameSize);
+                            sl::d27Log("PLAYER", "first frame exported bytes=%d",
+                                       frameSize);
                         }
                     }
 
@@ -1291,7 +1288,7 @@ void Player::Impl::run() {
                             submitted = true;
                             backpressure_ = false;
                         } else {
-                            fprintf(stderr, "[SlPlayer] 视频帧提交失败，丢弃\n");
+                            sl::d27Log("PLAYER", "frame submit failed, drop");
                         }
                     }
                     if (!submitted) {
@@ -1325,16 +1322,17 @@ void Player::Impl::run() {
                     if (!videoStarted) {
                         videoStarted = true;
                         if (playDiag)
-                            fprintf(stderr,
-                                    "[SlPlayer][diag] first submit pts=%.1f "
-                                    "queued=%u vf=%d stage=%d\n",
-                                    frameMs, queuedNow, videoFrames, stage_.load());
+                            sl::d27Log("PLAYER",
+                                       "diag first submit pts=%.1f queued=%u "
+                                       "vf=%d stage=%d",
+                                       frameMs, queuedNow, videoFrames,
+                                       stage_.load());
                         if (playDiag && lastSeekStartMs > 0)
-                            fprintf(stderr,
-                                    "[SlPlayer][diag] first submit after seek: "
-                                    "age=%lldms audio_pending=%d\n",
-                                    (long long)(steadyNowMs() - lastSeekStartMs),
-                                    audioReady && audio_.seekPending() ? 1 : 0);
+                            sl::d27Log("PLAYER",
+                                       "diag first submit after seek age=%lldms "
+                                       "audio_pending=%d",
+                                       (long long)(steadyNowMs() - lastSeekStartMs),
+                                       audioReady && audio_.seekPending() ? 1 : 0);
                         emit(EventType::PlaybackStart);
                     }
 
@@ -1348,10 +1346,10 @@ void Player::Impl::run() {
                         syncLog("seek first frame: target=%.0f first=%.0f queued=%u",
                                 seekDisplayTargetMs, frameMs, queuedNow);
                         if (playDiag)
-                            fprintf(stderr,
-                                    "[SlPlayer][diag] seek first frame recorded: "
-                                    "target=%.0f first=%.0f queued=%u\n",
-                                    seekDisplayTargetMs, frameMs, queuedNow);
+                            sl::d27Log("PLAYER",
+                                       "diag seek first frame recorded target=%.0f "
+                                       "first=%.0f queued=%u",
+                                       seekDisplayTargetMs, frameMs, queuedNow);
                     }
 
                     /* 恢复完成的定义：视频首帧已重建、音频启动已安排；
@@ -1399,10 +1397,11 @@ void Player::Impl::run() {
                                         audioBaseMs, firstFramePtsAfterSeekMs,
                                         presentationMs, measuredVideoLatencyMs,
                                         -offsetMs);
-                                fprintf(stderr,
-                                        "[SlPlayer] 队列稳定，等待画面到达目标再启动音频: "
-                                        "呈现 %.0f ms, 目标 %.0f ms, 等待 %.0f ms, 队列 %u ms\n",
-                                        presentationMs, audioBaseMs, -offsetMs, queuedNow);
+                                sl::d27LogIdentity("AUDIO",
+                                                   "queue stable, wait position: "
+                                                   "present=%.0f target=%.0f wait=%.0f queue=%u",
+                                                   presentationMs, audioBaseMs,
+                                                   -offsetMs, queuedNow);
                             } else {
                                 audio_.scheduleStart(0, skipMs);
                                 audioScheduled = true;
@@ -1415,10 +1414,11 @@ void Player::Impl::run() {
                                         audioBaseMs, firstFramePtsAfterSeekMs,
                                         presentationMs, measuredVideoLatencyMs, skipMs,
                                         frameMs, audio_.submittedMs(), queuedNow);
-                                fprintf(stderr,
-                                        "[SlPlayer] 队列稳定，画面已越过目标，安排音频启动点: "
-                                        "呈现 %.2f ms, 目标 %.0f ms, 跳过 %.2f ms\n",
-                                        presentationMs, audioBaseMs, skipMs);
+                                sl::d27LogIdentity("AUDIO",
+                                                   "queue stable, audio start: "
+                                                   "present=%.2f target=%.0f skip=%.2f",
+                                                   presentationMs, audioBaseMs,
+                                                   skipMs);
                             }
                         }
                     }
@@ -1438,10 +1438,11 @@ void Player::Impl::run() {
                                 "frame=%.2f audio_submit=%.2f queue=%u",
                                 audioStartPositionMs, presentationMs, skipMs,
                                 frameMs, audio_.submittedMs(), queuedNow);
-                        fprintf(stderr,
-                                "[SlPlayer] 画面到达目标，启动音频: "
-                                "目标 %.2f ms, 呈现 %.2f ms, 跳过 %.2f ms\n",
-                                audioStartPositionMs, presentationMs, skipMs);
+                        sl::d27LogIdentity("AUDIO",
+                                           "position reached, audio start: "
+                                           "target=%.2f present=%.2f skip=%.2f",
+                                           audioStartPositionMs, presentationMs,
+                                           skipMs);
                     }
 
                     /* 同步等待只允许失败，不允许绕过对齐强行出声。
@@ -1480,7 +1481,7 @@ void Player::Impl::run() {
                                           presentationMs, audioBaseMs, syncHighWaterMs,
                                           queuedNow, videoFrames, stage_.load(),
                                           syncNoProgressMs);
-                            fprintf(stderr, "[SlPlayer] %s，结束播放\n", detail);
+                            sl::d27Log("PLAYER", "end playback reason=%s", detail);
                             fail(detail);
                             return;
                         }

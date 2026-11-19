@@ -461,10 +461,14 @@ public:
     unsigned int bandwidth;
     int width, height;  // only for video
     int codecid;
+    std::string frameRate; // 可选，部分 playurl 响应提供 "30000/1001"
 };
 inline void from_json(const nlohmann::json& nlohmann_json_j, DashMedia& nlohmann_json_t) {
     if (nlohmann_json_j.contains("backup_url") && !nlohmann_json_j.at("backup_url").is_null()) {
         nlohmann_json_j.at("backup_url").get_to(nlohmann_json_t.backup_url);
+    }
+    if (nlohmann_json_j.contains("frameRate") && nlohmann_json_j.at("frameRate").is_string()) {
+        nlohmann_json_j.at("frameRate").get_to(nlohmann_json_t.frameRate);
     }
     NLOHMANN_JSON_EXPAND(NLOHMANN_JSON_PASTE(NLOHMANN_JSON_FROM, id, base_url, bandwidth, height, width, codecid));
 }

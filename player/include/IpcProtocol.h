@@ -57,6 +57,8 @@ extern "C" {
 #define SL_META_CONTENT_KEY "content"
 #define SL_META_ID_KEY      "id"
 #define SL_META_BV_KEY      "bv"
+#define SL_META_CID_KEY     "cid"
+#define SL_META_QN_KEY      "qn"
 #define SL_META_FIELD_MAX   128
 
 typedef struct {
@@ -65,6 +67,8 @@ typedef struct {
     char content[SL_META_FIELD_MAX];
     char id[SL_META_FIELD_MAX];
     char bv[SL_META_FIELD_MAX];
+    char cid[SL_META_FIELD_MAX];
+    char qn[SL_META_FIELD_MAX];
 } sl_session_meta_t;
 
 static inline int sl_session_meta_assign(sl_session_meta_t *meta,
@@ -82,6 +86,10 @@ static inline int sl_session_meta_assign(sl_session_meta_t *meta,
         dst = meta->id;
     else if (strcmp(key, SL_META_BV_KEY) == 0)
         dst = meta->bv;
+    else if (strcmp(key, SL_META_CID_KEY) == 0)
+        dst = meta->cid;
+    else if (strcmp(key, SL_META_QN_KEY) == 0)
+        dst = meta->qn;
     if (!dst)
         return 0;
     if (!*value || strchr(value, '=') || strchr(value, ' '))
@@ -163,21 +171,17 @@ static inline size_t sl_session_meta_format_args(const sl_session_meta_t *meta,
     if (!meta || !dst || cap == 0)
         return 0;
     int n = snprintf(dst, cap,
-                     "%s=%s\t%s=%s\t%s=%s\t%s=%s",
+                     "%s=%s\t%s=%s\t%s=%s\t%s=%s\t%s=%s\t%s=%s\t%s=%s",
                      SL_META_RUN_KEY, meta->run,
                      SL_META_SESSION_KEY, meta->session,
                      SL_META_CONTENT_KEY, meta->content,
-                     SL_META_ID_KEY, meta->id);
+                     SL_META_ID_KEY, meta->id,
+                     SL_META_BV_KEY, meta->bv,
+                     SL_META_CID_KEY, meta->cid,
+                     SL_META_QN_KEY, meta->qn);
     if (n <= 0 || (size_t)n >= cap)
         return 0;
-    size_t len = (size_t)n;
-    if (meta->bv[0]) {
-        n = snprintf(dst + len, cap - len, "\t%s=%s", SL_META_BV_KEY, meta->bv);
-        if (n <= 0 || (size_t)n >= cap - len)
-            return 0;
-        len += (size_t)n;
-    }
-    return len;
+    return (size_t)n;
 }
 
 /* ---- 命令（兼容层 -> daemon）---- */

@@ -12,6 +12,7 @@ endif()
 find_package(Threads REQUIRED)
 
 add_library(slplayer STATIC
+    src/DebugLog.cpp
     src/HttpSource.cpp
     src/AudioPipeline.cpp
     src/H264Sps.cpp

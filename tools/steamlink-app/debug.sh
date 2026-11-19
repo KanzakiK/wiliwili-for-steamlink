@@ -78,6 +78,7 @@ SCP="sshpass -p $PASS scp -o StrictHostKeyChecking=no"
     echo "health_window_ms=${HEALTH_WINDOW_MS:-}"
     echo "health_progress_ms=${HEALTH_PROGRESS_MS:-}"
     echo "health_net_grace_ms=${HEALTH_NET_GRACE_MS:-}"
+    echo "created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "host_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "device_time=$($SSH date 2>/dev/null || echo unavailable)"
     echo "wiliwili_md5=$(md5sum "$HOME/build-wiliwili/wiliwili" 2>/dev/null | awk '{print $1}' || true)"
@@ -138,6 +139,8 @@ collect() {
     $SCP "$DEVICE:/tmp/wiliwili.log" "$RUN_DIR/wiliwili.log" 2>/dev/null || true
     $SSH dmesg > "$RUN_DIR/dmesg.after.txt" 2>/dev/null || true
     echo "collected_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$RUN_DIR/manifest.txt"
+    ARCHIVE_SIZE=$(du -sb "$RUN_DIR" 2>/dev/null | awk '{print $1}' || echo 0)
+    echo "archive_size_bytes=${ARCHIVE_SIZE:-0}" >> "$RUN_DIR/manifest.txt"
 }
 trap collect EXIT INT TERM
 

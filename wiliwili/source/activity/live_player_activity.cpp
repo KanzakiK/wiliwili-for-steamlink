@@ -15,6 +15,7 @@
 
 #include "utils/shader_helper.hpp"
 #include "utils/config_helper.hpp"
+#include "utils/debug_log.hpp"
 #include "utils/dialog_helper.hpp"
 
 #include "view/video_view.hpp"
@@ -375,7 +376,11 @@ void LiveActivity::onLiveData(const bilibili::LiveRoomPlayInfo &result)
         auto url = i.host + liveUrl.base_url + i.extra;
 
         // D27: 直播权威标识是 room id，不使用 BV/oid 反推。
-        this->video->setDebugSession("live", std::to_string(liveData.roomid), "");
+        this->video->setDebugSession(
+            "live", std::to_string(liveData.roomid),
+            fmt::format("room_id={} uid={} title={} qn={}", liveData.roomid,
+                        liveRoomPlayInfo.uid, liveData.title, liveUrl.current_qn),
+            "", "", std::to_string(liveUrl.current_qn));
         // 设置视频链接
         brls::Logger::debug("Live stream url: {}", url);
         this->video->setUrl(url);

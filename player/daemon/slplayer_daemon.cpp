@@ -50,57 +50,59 @@ std::atomic<std::uint64_t> g_fileGeneration{0};
 std::mutex g_sessionMetaMutex;
 std::map<std::uint64_t, sl_session_meta_t> g_sessionMeta;
 
-static std::string sessionLogPrefix(std::uint64_t gen) {
-    std::lock_guard<std::mutex> lock(g_sessionMetaMutex);
-    auto it = g_sessionMeta.find(gen);
-    if (it == g_sessionMeta.end() || !it->second.run[0] || !it->second.session[0])
-        return "run=- session=-";
-    std::string prefix = std::string("run=") + it->second.run +
-                         " session=" + it->second.session;
-    if (it->second.bv[0])
-        prefix += std::string(" bv=") + it->second.bv;
-    return prefix;
+static const char* dash(const char* value) { return value && *value ? value : "-"; }
+
+static sl::DebugLogContext debugContextFromMeta(std::uint64_t gen,
+                                                const sl_session_meta_t& meta,
+                                                std::uint64_t req = 0) {
+    sl::DebugLogContext context;
+    context.run = meta.run;
+    context.session = meta.session;
+    context.content = meta.content;
+    context.id = meta.id;
+    context.bv = meta.bv;
+    context.cid = meta.cid;
+    context.qn = meta.qn;
+    context.generation = gen;
+    context.requestId = req;
+    return context;
 }
 
-static long long lifecycleNowMs() {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-               std::chrono::steady_clock::now().time_since_epoch())
-        .count();
+static std::string metaIdentity(const sl_session_meta_t& meta) {
+    return std::string("content=") + dash(meta.content) +
+           " id=" + dash(meta.id) + " bv=" + dash(meta.bv) +
+           " cid=" + dash(meta.cid) + " qn=" + dash(meta.qn);
 }
 
-static void lifecycleLogV(std::uint64_t gen, const char* fmt, va_list args) {
-    std::string prefix = sessionLogPrefix(gen);
-    fprintf(stderr, "[daemon][life] %lld %s ", lifecycleNowMs(), prefix.c_str());
-    vfprintf(stderr, fmt, args);
-    fputc('\n', stderr);
-}
-
-static void lifecycleLog(const char* fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
-    lifecycleLogV(g_fileGeneration.load(), fmt, args);
-    va_end(args);
-}
-
-static void lifecycleLogFor(std::uint64_t gen, const char* fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
-    lifecycleLogV(gen, fmt, args);
-    va_end(args);
-}
-
-static void daemonLogV(const char* fmt, va_list args) {
-    std::string prefix = sessionLogPrefix(g_fileGeneration.load());
-    fprintf(stderr, "[daemon] %s ", prefix.c_str());
-    vfprintf(stderr, fmt, args);
-    fputc('\n', stderr);
+static void daemonLogV(const char* source, std::uint64_t req,
+                       const char* fmt, va_list args) {
+    char message[2048];
+    vsnprintf(message, sizeof(message), fmt, args);
+    sl::d27LogReq(source, req, "%s", message);
 }
 
 static void daemonLog(const char* fmt, ...) {
     va_list args;
     va_start(args, fmt);
-    daemonLogV(fmt, args);
+    daemonLogV("DAEMON", 0, fmt, args);
     va_end(args);
+}
+
+static void daemonLogReq(std::uint64_t req, const char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    daemonLogV("DAEMON", req, fmt, args);
+    va_end(args);
+}
+
+static void daemonLogContext(const sl::DebugLogContext& context,
+                             const char* fmt, ...) {
+    char message[2048];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(message, sizeof(message), fmt, args);
+    va_end(args);
+    sl::d27LogContext("DAEMON", context, "%s", message);
 }
 
 static void storeSessionMeta(std::uint64_t gen, const sl_session_meta_t& meta) {
@@ -108,6 +110,14 @@ static void storeSessionMeta(std::uint64_t gen, const sl_session_meta_t& meta) {
     g_sessionMeta[gen] = meta;
     while (g_sessionMeta.size() > 8)
         g_sessionMeta.erase(g_sessionMeta.begin());
+}
+
+static bool getSessionMeta(std::uint64_t gen, sl_session_meta_t& meta) {
+    std::lock_guard<std::mutex> lock(g_sessionMetaMutex);
+    auto it = g_sessionMeta.find(gen);
+    if (it == g_sessionMeta.end()) return false;
+    meta = it->second;
+    return true;
 }
 
 /* PR_SET_PDEATHSIG 是「父线程死亡」语义；handler 只置 sig_atomic_t 标志。
@@ -341,10 +351,14 @@ int main(int argc, char** argv) {
             snprintf(args, sizeof(args), "%.3f\t%d\t%d", ev.duration,
                      info.width, info.height);
             emitContext(SL_EVT_OPENED, ev.requestId, args);
+            sl::d27LogReq("EVT", ev.requestId,
+                          "opened duration=%.3f width=%d height=%d status=ok",
+                          ev.duration, info.width, info.height);
             break;
         }
         case sl::EventType::PlaybackStart:
             emitContext(SL_EVT_PLAYBACK_START, ev.requestId);
+            sl::d27LogReq("EVT", ev.requestId, "playback start status=ok");
             break;
         case sl::EventType::Progress: {
             std::int64_t now = steadyNowMs();
@@ -358,24 +372,32 @@ int main(int argc, char** argv) {
         }
         case sl::EventType::Paused:
             emitContext(SL_EVT_PAUSED, ev.requestId);
+            sl::d27LogReq("EVT", ev.requestId, "paused status=ok");
             break;
         case sl::EventType::Resumed:
             emitContext(SL_EVT_RESUMED, ev.requestId);
+            sl::d27LogReq("EVT", ev.requestId, "resumed status=ok");
             break;
         case sl::EventType::Seeked: {
             char args[64];
             snprintf(args, sizeof(args), "%.3f", ev.position);
             emitContext(SL_EVT_SEEKED, ev.requestId, args);
+            sl::d27LogReq("EVT", ev.requestId,
+                          "seeked position=%.3f status=ok", ev.position);
             break;
         }
         case sl::EventType::EndFile:
             emitContext(SL_EVT_EOF, ev.requestId);
+            sl::d27LogReq("EVT", ev.requestId, "eof status=ok");
             break;
         case sl::EventType::Error:
             emitContext(SL_EVT_ERROR, ev.requestId, ev.message);
+            sl::d27LogReq("EVT", ev.requestId, "error message=%s", ev.message.c_str());
             break;
         case sl::EventType::Unsupported:
             emitContext(SL_EVT_ERROR, ev.requestId, "unsupported stream");
+            sl::d27LogReq("EVT", ev.requestId,
+                          "error message=unsupported stream");
             break;
         }
     });
@@ -383,6 +405,8 @@ int main(int argc, char** argv) {
         char args[512];
         snprintf(args, sizeof(args), "%s\t%s", sl::fatalTypeName(type), message.c_str());
         emit(SL_EVT_FATAL, args);
+        sl::d27LogReq("EVT", 0, "fatal type=%s message=%s",
+                      sl::fatalTypeName(type), message.c_str());
     });
 
     /* recv 超时，让主循环能定期检查 g_quit（PDEATHSIG/SIGTERM） */
@@ -396,7 +420,7 @@ int main(int argc, char** argv) {
         if (g_quit.load()) break;
         int rr = recvPayload(g_clientFd, payload);
         if (rr < 0) {
-            lifecycleLog("control disconnect opened=%d gen=%llu",
+            daemonLogReq(0, "control disconnect opened=%d gen=%llu",
                          opened ? 1 : 0,
                          (unsigned long long)g_fileGeneration.load());
             daemonLog("控制连接断开，退出");
@@ -408,12 +432,14 @@ int main(int argc, char** argv) {
         const std::string& cmd = f[0];
 
         if (cmd == SL_CMD_META) {
-            /* meta<TAB>gen<TAB>req<TAB>run=<id><TAB>session=<id><TAB>content=<type><TAB>id=<primary>[<TAB>bv=<BV>] */
+            /* meta<TAB>gen<TAB>req<TAB>run=...<TAB>session=...<TAB>content=...
+             * <TAB>id=...<TAB>bv=...<TAB>cid=...<TAB>qn=... */
             if (f.size() < 7) {
                 daemonLog("bad meta command");
                 continue;
             }
             std::uint64_t gen = parseUnsigned(f[1]);
+            std::uint64_t req = parseUnsigned(f[2]);
             std::string kv;
             for (size_t i = 3; i < f.size(); ++i) {
                 if (i > 3) kv += SL_IPC_FIELD_SEP;
@@ -422,13 +448,15 @@ int main(int argc, char** argv) {
             sl_session_meta_t meta;
             int rc = sl_session_meta_parse_kv_list(kv.c_str(), SL_IPC_FIELD_SEP, &meta);
             if (rc != 1) {
-                lifecycleLogFor(gen, "bad meta fields rc=%d", rc);
+                sl::DebugLogContext context;
+                context.generation = gen;
+                context.requestId = req;
+                daemonLogContext(context, "bad meta fields rc=%d", rc);
                 continue;
             }
             storeSessionMeta(gen, meta);
-            lifecycleLogFor(gen, "meta ok run=%s session=%s content=%s id=%s bv=%s",
-                            meta.run, meta.session, meta.content, meta.id,
-                            meta.bv[0] ? meta.bv : "-");
+            daemonLogContext(debugContextFromMeta(gen, meta, req),
+                             "meta ok %s", metaIdentity(meta).c_str());
             continue;
         }
 
@@ -441,12 +469,21 @@ int main(int argc, char** argv) {
             std::uint64_t fileGen = parseUnsigned(f[1]);
             std::uint64_t requestId = parseUnsigned(f[2]);
             g_fileGeneration.store(fileGen);
+            sl_session_meta_t storedMeta;
+            sl::DebugLogContext context;
+            if (getSessionMeta(fileGen, storedMeta))
+                context = debugContextFromMeta(fileGen, storedMeta, requestId);
+            else {
+                context.generation = fileGen;
+                context.requestId = requestId;
+            }
+            sl::setDebugLogContext(context);
             std::lock_guard<std::mutex> lock(playerMutex);
-            lifecycleLogFor(fileGen, "open enter req=%llu opened=%d",
-                            (unsigned long long)requestId, opened ? 1 : 0);
+            daemonLogReq(requestId, "open enter opened=%d", opened ? 1 : 0);
             if (opened) player.stop();
-            lifecycleLog("open old player stopped");
+            daemonLogReq(requestId, "open old player stopped");
             sl::SourceSpec spec;
+            spec.debug = context;
             spec.videoUrl = f[3];
             spec.referrer = f[4];
             spec.startSeconds = atof(f[5].c_str());
@@ -455,37 +492,49 @@ int main(int argc, char** argv) {
                 if (!f[i].empty()) spec.audioUrls.push_back(f[i]);
             }
             lastProgressMs.store(0);
-            lifecycleLogFor(fileGen, "open req=%llu (audio %zu)",
-                            (unsigned long long)requestId, spec.audioUrls.size());
+            daemonLogReq(requestId, "open source audio=%zu", spec.audioUrls.size());
             if (!player.open(spec)) {
-                lifecycleLog("open failed gen=%llu req=%llu",
-                             (unsigned long long)fileGen,
-                             (unsigned long long)requestId);
+                daemonLogReq(requestId, "open failed");
                 emitContext(SL_EVT_ERROR, requestId, "SlPlayer open failed");
                 continue;
             }
             opened = true;
-            lifecycleLog("open ok gen=%llu req=%llu, play",
-                         (unsigned long long)fileGen,
-                         (unsigned long long)requestId);
+            daemonLogReq(requestId, "open ok play");
             player.play(0);
         } else if (cmd == SL_CMD_PAUSE) {
-            if (commandGenerationMatches(f) && opened)
-                player.pause(parseUnsigned(f[2]));
+            std::uint64_t req = parseUnsigned(f[2]);
+            if (commandGenerationMatches(f) && opened) {
+                sl::DebugLogContext context = sl::currentDebugLogContext();
+                context.requestId = req;
+                sl::setDebugLogContext(context);
+                daemonLogReq(req, "pause status=sent");
+                player.pause(req);
+            }
         } else if (cmd == SL_CMD_RESUME) {
-            if (commandGenerationMatches(f) && opened)
-                player.play(parseUnsigned(f[2]));
+            std::uint64_t req = parseUnsigned(f[2]);
+            if (commandGenerationMatches(f) && opened) {
+                sl::DebugLogContext context = sl::currentDebugLogContext();
+                context.requestId = req;
+                sl::setDebugLogContext(context);
+                daemonLogReq(req, "resume status=sent");
+                player.play(req);
+            }
         } else if (cmd == SL_CMD_SEEK) {
-            if (commandGenerationMatches(f) && opened && f.size() >= 4)
-                player.seek(atof(f[3].c_str()), parseUnsigned(f[2]));
+            std::uint64_t req = parseUnsigned(f[2]);
+            if (commandGenerationMatches(f) && opened && f.size() >= 4) {
+                sl::DebugLogContext context = sl::currentDebugLogContext();
+                context.requestId = req;
+                sl::setDebugLogContext(context);
+                daemonLogReq(req, "seek target=%.3f status=sent", atof(f[3].c_str()));
+                player.seek(atof(f[3].c_str()), req);
+            }
         } else if (cmd == SL_CMD_STOP) {
             if (!commandGenerationMatches(f)) continue;
             std::lock_guard<std::mutex> lock(playerMutex);
             if (opened) {
-                lifecycleLog("stop enter gen=%llu",
-                             (unsigned long long)g_fileGeneration.load());
+                daemonLogReq(parseUnsigned(f[2]), "stop enter");
                 player.stop();
-                lifecycleLog("stop done");
+                daemonLogReq(parseUnsigned(f[2]), "stop done");
                 opened = false;
             }
         } else if (cmd == SL_CMD_VOLUME) {
@@ -516,9 +565,9 @@ int main(int argc, char** argv) {
     {
         std::lock_guard<std::mutex> lock(playerMutex);
         if (opened) {
-            lifecycleLog("shutdown stop enter");
+            daemonLog("shutdown stop enter");
             player.stop();
-            lifecycleLog("shutdown stop done");
+            daemonLog("shutdown stop done");
         }
     }
     if (g_clientFd >= 0) close(g_clientFd);

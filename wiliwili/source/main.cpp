@@ -12,6 +12,7 @@
 #include <borealis.hpp>
 
 #include "utils/config_helper.hpp"
+#include "utils/debug_log.hpp"
 #include "utils/activity_helper.hpp"
 #include "view/mpv_core.hpp"
 #include "view/video_view.hpp"
@@ -44,11 +45,7 @@ std::string d27Arg(const std::string& args, const char* key) {
 }
 
 void d27Log(const char* stage, const std::string& scene, const std::string& detail) {
-    const char* run = getenv("SL_DEBUG_RUN_ID");
-    std::string session = VideoView::getDebugSession();
-    fprintf(stderr, "[%s][run=%s][session=%s] scene=%s %s\n", stage,
-            run ? run : "-", session.empty() ? "-" : session.c_str(),
-            scene.c_str(), detail.c_str());
+    wiliwili::d27::log(stage, "scene=" + scene + " " + detail);
 }
 
 void d27ExpectPlaying(const std::string& scene, int attempts,
@@ -145,8 +142,46 @@ int main(int argc, char* argv[]) {
             std::string args = getenv("SL_DEBUG_ARGS") ? getenv("SL_DEBUG_ARGS") : "";
             int timeout = atoi(d27Arg(args, "timeout").c_str());
             if (timeout <= 0) timeout = 30;
+
+            std::string debugContentType = "page";
+            std::string debugContentId = content;
+            std::string debugContentBv;
+            std::string debugContentDetail = "target=" + content;
+            if (content.rfind("video:", 0) == 0) {
+                std::string value = content.substr(6);
+                size_t cidPos = value.find(':');
+                debugContentType = "video";
+                debugContentId = cidPos == std::string::npos ? value : value.substr(0, cidPos);
+                debugContentBv = debugContentId;
+                debugContentDetail = cidPos == std::string::npos
+                                         ? "bv=" + debugContentBv
+                                         : "bv=" + debugContentBv +
+                                               " cid=" + value.substr(cidPos + 1);
+            } else if (content.rfind("season:ep:", 0) == 0) {
+                debugContentType = "season";
+                debugContentId = content.substr(10);
+                debugContentDetail = "ep_id=" + debugContentId;
+            } else if (content.rfind("season:", 0) == 0) {
+                debugContentType = "season";
+                debugContentId = content.substr(7);
+                debugContentDetail = "season_id=" + debugContentId;
+            } else if (content.rfind("live:", 0) == 0) {
+                debugContentType = "live";
+                debugContentId = content.substr(5);
+                debugContentDetail = "room_id=" + debugContentId;
+            } else if (content.rfind("dynamic:", 0) == 0) {
+                debugContentType = "dynamic";
+                debugContentId = content.substr(8);
+                debugContentDetail = "id=" + debugContentId;
+            }
+            wiliwili::d27::prepareControllerSession(debugContentType, debugContentId,
+                                                    debugContentDetail, debugContentBv);
+            if (debugContentType == "page") {
+                wiliwili::d27::reuseOrBeginSession("page", debugContentId,
+                                                   debugContentDetail);
+            }
             if (content.rfind("video:", 0) == 0)
-                Intent::openBV(content.substr(6));
+                Intent::openBV(debugContentId);
             else if (content.rfind("season:ep:", 0) == 0)
                 Intent::openSeasonByEpId(strtoull(content.substr(10).c_str(), nullptr, 10));
             else if (content.rfind("season:", 0) == 0)
@@ -164,7 +199,10 @@ int main(int argc, char* argv[]) {
             d27Log("CMD", scene, "status=start content=" + content);
 
             if (scene == "page_nav" || scene == "none") {
-                brls::delay(500, [scene]() { d27Log("CMD", scene, "status=ok"); });
+                brls::delay(500, [scene]() {
+                    d27Log("CMD", scene, "status=ok");
+                    wiliwili::d27::endSession("user_stop");
+                });
             } else if (scene == "play") {
                 d27ExpectPlaying(scene, timeout * 5,
                                  [scene]() { d27Log("CMD", scene, "status=ok"); });

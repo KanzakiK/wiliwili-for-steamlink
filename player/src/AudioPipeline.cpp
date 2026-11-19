@@ -1,5 +1,6 @@
 #include "AudioPipeline.h"
 
+#include "DebugLog.h"
 #include "HttpSource.h"
 
 #include <algorithm>
@@ -59,7 +60,7 @@ bool AudioPipeline::start(CSLAudioContext* context, AVFormatContext* format,
     AVStream* stream = format->streams[audioIndex];
     const AVCodec* codec = avcodec_find_decoder(stream->codecpar->codec_id);
     if (!codec) {
-        fprintf(stderr, "[SlAudio] 找不到音频解码器\n");
+        sl::d27Log("AUDIO", "decoder not found");
         return false;
     }
 
@@ -67,7 +68,7 @@ bool AudioPipeline::start(CSLAudioContext* context, AVFormatContext* format,
     if (!decoder_ ||
         avcodec_parameters_to_context(decoder_, stream->codecpar) < 0 ||
         avcodec_open2(decoder_, codec, nullptr) < 0) {
-        fprintf(stderr, "[SlAudio] 音频解码器初始化失败\n");
+        sl::d27Log("AUDIO", "decoder init failed");
         if (decoder_)
             avcodec_free_context(&decoder_);
         return false;
@@ -77,7 +78,7 @@ bool AudioPipeline::start(CSLAudioContext* context, AVFormatContext* format,
     rate_.store(kSinkRateHz);
     frameBytes_ = kSinkRateHz * kFrameMs * 2 * (int)sizeof(int16_t) / 1000;
     if (frameBytes_ <= 0) {
-        fprintf(stderr, "[SlAudio] 帧长计算失败\n");
+        sl::d27Log("AUDIO", "frame size calculation failed");
         avcodec_free_context(&decoder_);
         return false;
     }
@@ -95,7 +96,7 @@ bool AudioPipeline::start(CSLAudioContext* context, AVFormatContext* format,
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
     if (!streamReady) {
-        fprintf(stderr, "[SlAudio] 音频设备不可用，本次播放静音\n");
+        sl::d27Log("AUDIO", "device unavailable, silent playback");
         avcodec_free_context(&decoder_);
         return false;
     }
@@ -119,8 +120,8 @@ bool AudioPipeline::start(CSLAudioContext* context, AVFormatContext* format,
     pendingStartAt_ = 0.0;
     pendingStartSequence_ = 0;
 
-    fprintf(stderr, "[SlAudio] 源 %d Hz -> SLAudio %d Hz / 2ch / %d 字节每帧（%d ms）\n",
-            sourceRate, kSinkRateHz, frameBytes_, kFrameMs);
+    sl::d27Log("AUDIO", "format source=%dHz sink=%dHz channels=2 frame_bytes=%d frame_ms=%d",
+               sourceRate, kSinkRateHz, frameBytes_, kFrameMs);
 
     thread_ = std::thread(&AudioPipeline::threadMain, this);
     return true;
@@ -221,8 +222,8 @@ void AudioPipeline::requestSeek(double targetSeconds) {
         packets_.clear();
         packetBytes_ = 0;
     }
-    fprintf(stderr, "[SlAudio] seek queued seq=%llu target=%.3f\n",
-            (unsigned long long)sequence, targetSeconds);
+    sl::d27Log("AUDIO", "seek queued seq=%llu target=%.3f",
+               (unsigned long long)sequence, targetSeconds);
     cond_.notify_all();
 }
 
@@ -382,7 +383,7 @@ void AudioPipeline::handleFrame(AVFrame* frame) {
                                       0, nullptr);
         if (ret < 0 || swr_init(swr_) < 0) {
             if (!warned_) {
-                fprintf(stderr, "[SlAudio] 重采样器初始化失败\n");
+                sl::d27Log("AUDIO", "resampler init failed");
                 warned_ = true;
             }
             swr_free(&swr_);
@@ -455,10 +456,10 @@ void AudioPipeline::submit(const uint8_t* data, int size) {
         if (skipBytes > preroll_.size())
             skipBytes = preroll_.size();
         if (rate > 0) {
-            fprintf(stderr,
-                    "[SlAudio] 启动: 预缓冲 %.3f s, 跳过 %.3f s, 偏移 %.1f ms\n",
-                    preroll_.size() / (rate * 4.0), skipBytes / (rate * 4.0),
-                    startOffsetSec_ * 1000.0);
+            sl::d27Log("AUDIO",
+                       "start preroll=%.3fs skip=%.3fs offset=%.1fms",
+                       preroll_.size() / (rate * 4.0),
+                       skipBytes / (rate * 4.0), startOffsetSec_ * 1000.0);
         }
         if (preroll_.size() > skipBytes) {
             submitDirect(preroll_.data() + skipBytes,
@@ -509,7 +510,7 @@ bool AudioPipeline::drainFrame() {
     void* output = SLAudio_BeginFrame(stream_);
     if (!output) {
         if (!warned_) {
-            fprintf(stderr, "[SlAudio] SLAudio_BeginFrame 返回空，丢弃一帧\n");
+            sl::d27Log("AUDIO", "BeginFrame returned empty, drop frame");
             warned_ = true;
         }
         return true;
@@ -554,7 +555,7 @@ bool AudioPipeline::ensureStream() {
     stream_ = SLAudio_CreateStream(context_, rate, 2, frameBytes_, 1);
     if (!stream_) {
         if (!warned_) {
-            fprintf(stderr, "[SlAudio] SLAudio_CreateStream 失败\n");
+            sl::d27Log("AUDIO", "CreateStream failed");
             warned_ = true;
         }
         return false;
@@ -582,7 +583,7 @@ bool AudioPipeline::seekInternal(double targetSeconds) {
         if (ok) {
             avformat_flush(format_);
         } else {
-            fprintf(stderr, "[SlAudio] 音频流跳转失败（可能超出缓冲窗口）\n");
+            sl::d27Log("AUDIO", "audio seek failed, possible range window miss");
         }
     }
 
@@ -616,9 +617,9 @@ void AudioPipeline::finishSeek(std::uint64_t sequence, bool ok) {
         std::lock_guard<std::mutex> lock(lock_);
         latest = sequence == seekSequence_.load();
         if (!latest) {
-            fprintf(stderr, "[SlAudio] 丢弃过期 seek seq=%llu current=%llu\n",
-                    (unsigned long long)sequence,
-                    (unsigned long long)seekSequence_.load());
+            sl::d27Log("AUDIO", "drop stale seek seq=%llu current=%llu",
+                       (unsigned long long)sequence,
+                       (unsigned long long)seekSequence_.load());
         } else {
             seekRequest_.store(false);
             /* 首帧对齐可能在音频 stream 重建完成前到达；此时原样应用，
@@ -633,8 +634,8 @@ void AudioPipeline::finishSeek(std::uint64_t sequence, bool ok) {
     }
     cond_.notify_all();
     if (latest) {
-        fprintf(stderr, "[SlAudio] seek done seq=%llu ok=%d\n",
-                (unsigned long long)sequence, ok ? 1 : 0);
+        sl::d27Log("AUDIO", "seek done seq=%llu ok=%d",
+                   (unsigned long long)sequence, ok ? 1 : 0);
     }
 }
 

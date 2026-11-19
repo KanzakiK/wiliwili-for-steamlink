@@ -628,15 +628,38 @@ void BasePlayerActivity::onVideoPlayUrl(const bilibili::VideoUrlResult& result) 
         std::string bvid =
             videoDetailResult.bvid.empty() ? episodeResult.bvid : videoDetailResult.bvid;
         std::string id = bvid.empty() ? "unknown" : bvid;
-        std::string detail = fmt::format("cid={} aid={} qn={}", videoDetailPage.cid,
-                                         videoDetailResult.aid, result.quality);
+        int width = 0, height = 0;
+        std::string fps;
+        for (const auto& media : result.dash.video) {
+            if (media.id != result.quality) continue;
+            width  = media.width;
+            height = media.height;
+            fps    = media.frameRate;
+            break;
+        }
+        if (width == 0 && !result.dash.video.empty()) {
+            width  = result.dash.video.front().width;
+            height = result.dash.video.front().height;
+            fps    = result.dash.video.front().frameRate;
+        }
+        std::string detail = fmt::format("cid={} aid={} qn={} width={} height={} fps={} start={}",
+                                         videoDetailPage.cid, videoDetailResult.aid,
+                                         result.quality, width, height,
+                                         fps.empty() ? "-" : fps, start);
         if (seasonInfo.season_id > 0) {
             content = "season";
-            id = std::to_string(seasonInfo.season_id);
-            detail = fmt::format("season_id={} cid={} qn={}", seasonInfo.season_id,
-                                 videoDetailPage.cid, result.quality);
+            id = episodeResult.id > 0 ? std::to_string(episodeResult.id)
+                                      : std::to_string(seasonInfo.season_id);
+            detail = fmt::format("season_id={} ep_id={} cid={} aid={} qn={} width={} height={} fps={} start={}",
+                                 seasonInfo.season_id, episodeResult.id, episodeResult.cid,
+                                 episodeResult.aid, result.quality, width, height,
+                                 fps.empty() ? "-" : fps, start);
         }
-        this->video->setDebugSession(content, id, detail, bvid);
+        this->video->setDebugSession(content, id, detail, bvid,
+                                     std::to_string(seasonInfo.season_id > 0
+                                                        ? episodeResult.cid
+                                                        : videoDetailPage.cid),
+                                     std::to_string(result.quality));
     }
 
     if (!result.dash.video.empty()) {

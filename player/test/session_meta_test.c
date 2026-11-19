@@ -25,6 +25,7 @@ int main(void) {
         "session=20261119-120000-1234-1,"
         "content=video,id=BV1Nvx16TEzY,"
         "bv=BV1Nvx16TEzY,"
+        "cid=43208345449,qn=64,"
         "start=120,audio-file=\"https://example.invalid/a.m4s\"";
 
     CHECK(sl_session_meta_parse_extra(extra, &meta) == 1);
@@ -33,6 +34,8 @@ int main(void) {
     CHECK(strcmp(meta.content, "video") == 0);
     CHECK(strcmp(meta.id, "BV1Nvx16TEzY") == 0);
     CHECK(strcmp(meta.bv, "BV1Nvx16TEzY") == 0);
+    CHECK(strcmp(meta.cid, "43208345449") == 0);
+    CHECK(strcmp(meta.qn, "64") == 0);
 
     memset(args, 0, sizeof(args));
     CHECK(sl_session_meta_format_args(&meta, args, sizeof(args)) > 0);
@@ -41,6 +44,8 @@ int main(void) {
     CHECK(strstr(args, "content=video") != NULL);
     CHECK(strstr(args, "id=BV1Nvx16TEzY") != NULL);
     CHECK(strstr(args, "bv=BV1Nvx16TEzY") != NULL);
+    CHECK(strstr(args, "cid=43208345449") != NULL);
+    CHECK(strstr(args, "qn=64") != NULL);
 
     CHECK(sl_session_meta_parse_extra("start=120", &meta) == 0);
     CHECK(sl_session_meta_parse_extra(
@@ -55,13 +60,16 @@ int main(void) {
 
     const char *metaArgs =
         "run=20261119-120000-1234\tsession=20261119-120000-1234-1\t"
-        "content=season\tid=32210658858853486\tbv=BV1TEST";
+        "content=season\tid=323434\tbv=BV1TEST\t"
+        "cid=184620662\tqn=64";
     CHECK(sl_session_meta_parse_kv_list(metaArgs, SL_IPC_FIELD_SEP, &meta) == 1);
     CHECK(strcmp(meta.run, "20261119-120000-1234") == 0);
     CHECK(strcmp(meta.session, "20261119-120000-1234-1") == 0);
     CHECK(strcmp(meta.content, "season") == 0);
-    CHECK(strcmp(meta.id, "32210658858853486") == 0);
+    CHECK(strcmp(meta.id, "323434") == 0);
     CHECK(strcmp(meta.bv, "BV1TEST") == 0);
+    CHECK(strcmp(meta.cid, "184620662") == 0);
+    CHECK(strcmp(meta.qn, "64") == 0);
 
     /* 直播没有 BV，仍是合法 session；不能因为缺 bv 判失败。 */
     const char *liveArgs =

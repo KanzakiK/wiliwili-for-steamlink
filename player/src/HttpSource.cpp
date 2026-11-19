@@ -1,5 +1,6 @@
 #include "HttpSource.h"
 
+#include "DebugLog.h"
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
@@ -93,8 +94,7 @@ public:
             stop_ = false;
             errorMessage_.clear();
             rangeStart_ = offset;
-            fprintf(stderr, "[SlHttp] Range 重定位: offset=%lld\n",
-                    (long long)offset);
+            sl::d27Log("HTTP", "range relocate offset=%lld", (long long)offset);
             cond_.notify_all();
         }
         start();
@@ -140,17 +140,17 @@ public:
     int read(uint8_t* data, int size) {
         std::unique_lock<std::mutex> lock(mutex_);
         if (endOffset_ < readPos_ + size && debug_)
-            fprintf(stderr, "[SlHttp] read wait size=%d pos=%lld end=%lld base=%lld\n",
-                    size, (long long)readPos_, (long long)endOffset_,
-                    (long long)baseOffset_);
+            sl::d27Log("HTTP", "read wait size=%d pos=%lld end=%lld base=%lld",
+                       size, (long long)readPos_, (long long)endOffset_,
+                       (long long)baseOffset_);
         while (!stop_ && !error_ && !eof_ && endOffset_ < readPos_ + size)
             cond_.wait(lock);
 
         if (error_ || stop_)
             return AVERROR_EXIT;
         if (readPos_ < baseOffset_) {
-            fprintf(stderr, "[SlHttp] 读取位置已被窗口淘汰: pos=%lld base=%lld\n",
-                    (long long)readPos_, (long long)baseOffset_);
+            sl::d27Log("HTTP", "read position evicted pos=%lld base=%lld",
+                       (long long)readPos_, (long long)baseOffset_);
             return AVERROR(EIO);
         }
 
@@ -187,9 +187,9 @@ public:
 
         std::unique_lock<std::mutex> lock(mutex_);
         if (debug_)
-            fprintf(stderr, "[SlHttp] seek whence=%d offset=%lld pos=%lld end=%lld\n",
-                    whence, (long long)offset, (long long)readPos_,
-                    (long long)endOffset_);
+            sl::d27Log("HTTP", "seek whence=%d offset=%lld pos=%lld end=%lld",
+                       whence, (long long)offset, (long long)readPos_,
+                       (long long)endOffset_);
         int64_t target;
         if (whence == SEEK_SET) {
             target = offset;
@@ -252,7 +252,7 @@ private:
                 std::lock_guard<std::mutex> lock(self->mutex_);
                 if (self->expectRangeStatus_ && status != 206) {
                     self->rejectRangeBody_ = true;
-                    fprintf(stderr, "[SlHttp] Range 未被接受: HTTP %d\n", status);
+                    sl::d27Log("HTTP", "range rejected http=%d", status);
                 }
             }
         }
@@ -353,10 +353,12 @@ private:
                 }
                 if (attempt < kDownloadMaxRetries) {
                     /* 已下载的 chunk 保留；下次从窗口末尾续传，已排队读取不受影响。 */
-                    fprintf(stderr,
-                            "[SlHttp] 传输中断: %s / HTTP %ld，从 %lld 续传 %d/%d\n",
-                            curl_easy_strerror(result), httpStatus,
-                            (long long)endOffset_, attempt + 1, kDownloadMaxRetries);
+                    sl::d27Log("HTTP",
+                               "transfer interrupted error=%s http=%ld "
+                               "resume=%lld retry=%d/%d",
+                               curl_easy_strerror(result), httpStatus,
+                               (long long)endOffset_, attempt + 1,
+                               kDownloadMaxRetries);
                     if (errorClock_)
                         errorClock_->store(steadyNowMs(), std::memory_order_relaxed);
                     error_ = false;
@@ -367,15 +369,15 @@ private:
                     if (errorClock_)
                         errorClock_->store(steadyNowMs(), std::memory_order_relaxed);
                     if (result != CURLE_OK) {
-                        fprintf(stderr, "[SlHttp] 下载失败: %s\n",
-                                curl_easy_strerror(result));
+                        sl::d27Log("HTTP", "download failed error=%s",
+                                   curl_easy_strerror(result));
                         errorMessage_ = curl_easy_strerror(result);
                     } else if (httpStatus >= 400) {
-                        fprintf(stderr, "[SlHttp] HTTP %ld\n", httpStatus);
+                        sl::d27Log("HTTP", "http error status=%ld", httpStatus);
                         errorMessage_ = "HTTP error";
                     } else {
-                        fprintf(stderr, "[SlHttp] Range 请求未返回 206: %ld\n",
-                                httpStatus);
+                        sl::d27Log("HTTP", "range request not 206 status=%ld",
+                                   httpStatus);
                         errorMessage_ = "Range unsupported";
                     }
                     error_ = true;
@@ -401,9 +403,9 @@ private:
                 if (totalBytes_ + bytes <= kStreamBufferLimit)
                     break;
                 if (debug_)
-                    fprintf(stderr, "[SlHttp] append wait total=%zu pos=%lld base=%lld\n",
-                            totalBytes_, (long long)readPos_,
-                            (long long)baseOffset_);
+                    sl::d27Log("HTTP", "append wait total=%zu pos=%lld base=%lld",
+                               totalBytes_, (long long)readPos_,
+                               (long long)baseOffset_);
                 cond_.wait(lock);
             }
             if (stop_ || error_)
@@ -663,8 +665,8 @@ int64_t HttpSource::seekCallback(void* opaque, int64_t offset, int whence) {
             if (ratio < 0.0) ratio = 0.0;
             if (ratio > 1.0) ratio = 1.0;
             int64_t mapped = (int64_t)((double)length * ratio);
-            fprintf(stderr, "[SlHttp] seek 时间提示: %.3f/%.3fs -> %lld/%ld\n",
-                    seconds, duration, (long long)mapped, length);
+            sl::d27Log("HTTP", "seek time hint %.3f/%.3fs -> %lld/%ld",
+                       seconds, duration, (long long)mapped, length);
             return downloader->seek(mapped, whence);
         }
     }

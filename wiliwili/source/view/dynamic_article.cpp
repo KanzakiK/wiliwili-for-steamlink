@@ -6,6 +6,7 @@
 #include <borealis/core/touch/tap_gesture.hpp>
 #include <borealis/core/thread.hpp>
 #include <utility>
+#include <variant>
 
 #include "view/dynamic_article.hpp"
 #include "view/text_box.hpp"
@@ -20,6 +21,31 @@
 #include "utils/activity_helper.hpp"
 #include "utils/shortcut_helper.hpp"
 #include "utils/config_helper.hpp"
+#include "utils/debug_log.hpp"
+
+namespace {
+
+std::string d27DynamicRefs(const bilibili::DynamicArticleResult& result) {
+    std::string refs;
+    for (const auto& module : result.modules) {
+        auto* data = std::get_if<bilibili::DynamicArticleModuleData>(&module.data);
+        if (!data) continue;
+        if (auto* archive = std::get_if<bilibili::DynamicArticleModuleArchive>(&data->data)) {
+            if (!archive->bvid.empty()) refs += " nested_video_bvid=" + archive->bvid;
+            if (archive->epid) refs += " nested_ep_id=" + std::to_string(archive->epid);
+        } else if (auto* draw = std::get_if<bilibili::DynamicArticleModuleDraw>(&data->data)) {
+            refs += " image_count=" + std::to_string(draw->items.size());
+        } else if (auto* live = std::get_if<bilibili::DynamicArticleModuleLive>(&data->data)) {
+            if (live->card_info.live_play_info.room_id)
+                refs += " nested_live_room=" + std::to_string(live->card_info.live_play_info.room_id);
+        } else if (auto* forward = std::get_if<bilibili::DynamicArticleModuleForward>(&data->data)) {
+            if (!forward->item.id_str.empty()) refs += " forward_id=" + forward->item.id_str;
+        }
+    }
+    return refs;
+}
+
+} // namespace
 
 using namespace brls::literals;
 
@@ -37,6 +63,7 @@ public:
         });
         this->svgOpen->registerClickAction([this](...) {
             brls::Application::popActivity(brls::TransitionAnimation::NONE);
+            wiliwili::d27::setPendingParent(wiliwili::d27::currentSession());
             if (this->live.room_id != 0) {
                 Intent::openLive(this->live.room_id, this->live.title, this->live.watched_show.text_large);
             } else if (video.epid != 0) {
@@ -47,6 +74,7 @@ public:
             return true;
         });
         this->svgGallery->registerClickAction([this](...) {
+            wiliwili::d27::setPendingParent(wiliwili::d27::currentSession());
             Intent::openGallery(images);
             return true;
         });
@@ -421,11 +449,18 @@ DynamicArticleDetail::DynamicArticleDetail(const std::string& id) {
 
 DynamicArticleDetail::DynamicArticleDetail(const bilibili::DynamicArticleResult& data,
                                            const bilibili::DynamicArticleModuleState& state) {
+    wiliwili::d27::reuseOrBeginSession("dynamic", data.id_str.empty() ? "unknown" : data.id_str,
+                                       "type=" + data.type + d27DynamicRefs(data));
+    wiliwili::d27::setPendingParent(wiliwili::d27::currentSession());
     this->inflateFromXMLRes("xml/fragment/dynamic_detail.xml");
     initList(data, state);
 }
 
 void DynamicArticleDetail::onDynamicArticle(const bilibili::DynamicArticleResult& result) {
+    wiliwili::d27::reuseOrBeginSession(
+        "dynamic", result.id_str.empty() ? "unknown" : result.id_str,
+        "type=" + result.type + d27DynamicRefs(result));
+    wiliwili::d27::setPendingParent(wiliwili::d27::currentSession());
     for (auto& j : result.modules) {
         if ((bilibili::DynamicArticleModuleType)j.data.index() != bilibili::DynamicArticleModuleType::MODULE_TYPE_STAT)
             continue;

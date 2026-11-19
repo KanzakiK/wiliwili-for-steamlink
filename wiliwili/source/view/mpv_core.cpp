@@ -11,6 +11,7 @@
 #include <borealis/core/application.hpp>
 
 #include "utils/config_helper.hpp"
+#include "utils/debug_log.hpp"
 #include "utils/number_helper.hpp"
 #include "utils/crash_helper.hpp"
 #include "view/mpv_core.hpp"
@@ -968,6 +969,11 @@ void MPVCore::eventMainLoop() {
                     mpv_error_code = node->error;
                     brls::Logger::error("========> MPV ERROR: {}", mpvErrorString(node->error));
                     mpvCoreEvent.fire(MpvEventEnum::MPV_FILE_ERROR);
+                    wiliwili::d27::endSession("error");
+                } else if (node->reason == MPV_END_FILE_REASON_EOF) {
+                    wiliwili::d27::endSession("eof");
+                } else {
+                    wiliwili::d27::endSession("user_stop");
                 }
 #ifdef BOREALIS_USE_GXM
                 else
@@ -1148,9 +1154,7 @@ void MPVCore::eventMainLoop() {
                     case 22:
                         if (data) {
                             static const char* hint = "播放不流畅，可尝试切换到 720P";
-                            const char* runId = getenv("SL_DEBUG_RUN_ID");
-                            fprintf(stderr, "[UI][health] run=%s hint shown\n",
-                                    runId ? runId : "-");
+                            wiliwili::d27::log("UI", "health hint shown");
                             APP_E->fire("HINT", (void*)hint);
                         }
                         break;

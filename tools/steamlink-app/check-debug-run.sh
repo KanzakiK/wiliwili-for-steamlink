@@ -4,13 +4,11 @@
 #
 # 用法: bash tools/steamlink-app/check-debug-run.sh debug-runs/<run-id>
 #
-# 检查：
-#   - manifest / prestart / 统一日志 / dmesg before-after / launch_cmdline 齐全
-#   - CMD start/ok 对应的 dmesg 边界快照齐全
-#   - boot 行含同一 run id
-#   - 场景有 CMD status=start 与 status=ok
-#   - 播放器场景的 session 在 CMD、UI content start、daemon meta 中一致
-#   - 统一日志不含签名 URL 参数
+# 统一日志行格式：
+#   [HH:MM:SS.mmm][SOURCE][run=...][session=...][gen=...][req=...] message
+#
+# 检查：manifest / prestart / 统一日志 / dmesg 附件齐全；CMD、EVT、内容身份、
+# session 透传、敏感信息脱敏和 D22 健康提示满足 08 文档契约。
 set -u
 
 RUN_DIR=${1:-}
@@ -30,6 +28,16 @@ check_pattern() {
         pass "$1 含 $3"
     else
         fail "$1 缺少 $3"
+    fi
+}
+field_from() {
+    printf '%s\n' "$1" | sed -n "s/.*[ =]$2=\\([^ ]*\\).*/\\1/p" | head -1
+}
+check_both() {
+    if grep -F "$2" "$RUN_DIR/$1" 2>/dev/null | grep -F "$3" >/dev/null 2>&1; then
+        pass "$1 含 $4"
+    else
+        fail "$1 缺少 $4"
     fi
 }
 
@@ -52,52 +60,136 @@ fi
 if [ -z "$SCENE" ] || [ "$SCENE" = "none" ]; then
     fail "manifest 缺少有效 scene"
 fi
+for key in created_at collected_at archive_size_bytes; do
+    if grep -q "^$key=" "$RUN_DIR/manifest.txt" 2>/dev/null; then
+        pass "manifest 含 $key"
+    else
+        fail "manifest 缺少 $key"
+    fi
+done
 check_file "dmesg.$SCENE.start.txt"
 check_file "dmesg.$SCENE.ok.txt"
 
 check_pattern wiliwili.log "[boot] run=$RUN_ID" "boot run id"
-check_pattern wiliwili.log "[CMD][run=$RUN_ID][session=" "CMD run/session 前缀"
+check_pattern wiliwili.log "][CMD][run=$RUN_ID][session=" "统一 CMD 行"
 check_pattern wiliwili.log "scene=$SCENE status=start" "CMD status=start"
 check_pattern wiliwili.log "scene=$SCENE status=ok" "CMD status=ok"
 
-case "$SCENE" in
-    play|seek_forward|seek_backward|pause_resume)
-        SESSION=$(grep -F "scene=$SCENE status=ok" "$RUN_DIR/wiliwili.log" 2>/dev/null |
-            sed -n 's/.*\[session=\([^]]*\)\].*/\1/p' | grep -v '^-' | head -1)
-        if [ -z "$SESSION" ]; then
-            fail "播放器场景没有有效 session"
-        else
-            pass "播放器场景 session=$SESSION"
-            check_pattern wiliwili.log "[UI][run=$RUN_ID][session=$SESSION] content start" "UI content start"
-            check_pattern wiliwili.log "run=$RUN_ID session=$SESSION" "daemon session"
-            check_pattern wiliwili.log "meta ok run=$RUN_ID session=$SESSION" "meta 完成"
+if grep -Eq '^\[[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}\]\[[A-Z]+\]\[run=' \
+        "$RUN_DIR/wiliwili.log"; then
+    pass "统一日志时间戳与 source/run 前缀"
+else
+    fail "统一日志缺少时间戳/source/run 前缀"
+fi
+if grep -Eq '\[mpv-compat\]|\[SlPlayer\]|\[SlAudio\]|\[daemon\]\[life\]' \
+        "$RUN_DIR/wiliwili.log"; then
+    fail "统一日志仍含旧 source 前缀"
+else
+    pass "统一日志无旧 source 前缀"
+fi
 
-            CONTENT_TYPE=$(grep -F "[UI][run=$RUN_ID][session=$SESSION] content start" "$RUN_DIR/wiliwili.log" 2>/dev/null |
-                sed -n 's/.* content start content=\([^ ]*\).*/\1/p' | head -1)
-            UI_BV=$(grep -F "[UI][run=$RUN_ID][session=$SESSION] content start" "$RUN_DIR/wiliwili.log" 2>/dev/null |
-                sed -n 's/.* bv=\([^ ]*\).*/\1/p' | head -1)
-            META_BV=$(grep -F "meta ok run=$RUN_ID session=$SESSION" "$RUN_DIR/wiliwili.log" 2>/dev/null |
-                sed -n 's/.* bv=\([^ ]*\).*/\1/p' | head -1)
+SESSION=$(grep -F "scene=$SCENE status=ok" "$RUN_DIR/wiliwili.log" 2>/dev/null |
+    sed -n 's/.*\[session=\([^]]*\)\].*/\1/p' | grep -v '^-' | head -1)
+if [ -z "$SESSION" ]; then
+    fail "场景没有有效 session"
+else
+    pass "场景 session=$SESSION"
+    PREFIX="[run=$RUN_ID][session=$SESSION]"
+
+    case "$SCENE" in
+        play|seek_forward|seek_backward|pause_resume)
+            check_pattern wiliwili.log "][UI]$PREFIX" "UI 统一行"
+            check_pattern wiliwili.log "][UI]$PREFIX[gen=-][req=-] content start" "UI content start"
+            check_pattern wiliwili.log "][COMPAT]$PREFIX" "compat 统一行"
+            check_both wiliwili.log "$PREFIX" "meta ok" "daemon meta ok"
+            check_both wiliwili.log "$PREFIX" "open enter" "daemon open"
+            check_pattern wiliwili.log "][PLAYER]$PREFIX" "player 统一行"
+            check_pattern wiliwili.log "][AUDIO]$PREFIX" "audio 统一行"
+
+            START_LINE=$(grep -F "][UI]$PREFIX[gen=-][req=-] content start" "$RUN_DIR/wiliwili.log" 2>/dev/null | head -1)
+            META_LINE=$(grep -F "$PREFIX" "$RUN_DIR/wiliwili.log" 2>/dev/null | grep -F "meta ok" | head -1)
+            LOAD_LINE=$(grep -F "$PREFIX" "$RUN_DIR/wiliwili.log" 2>/dev/null | grep -F " loadfile " | head -1)
+
+            CONTENT_TYPE=$(field_from "$START_LINE" content)
+            UI_ID=$(field_from "$START_LINE" id)
+            UI_BV=$(field_from "$START_LINE" bv)
+            UI_CID=$(field_from "$START_LINE" cid)
+            UI_QN=$(field_from "$START_LINE" qn)
+            META_BV=$(field_from "$META_LINE" bv)
+            META_CID=$(field_from "$META_LINE" cid)
+            META_QN=$(field_from "$META_LINE" qn)
+            LOAD_BV=$(field_from "$LOAD_LINE" bv)
+            LOAD_CID=$(field_from "$LOAD_LINE" cid)
+            LOAD_QN=$(field_from "$LOAD_LINE" qn)
+
+            if [ -n "$LOAD_LINE" ]; then pass "loadfile 带权威内容字段"; else fail "loadfile 缺少权威内容字段"; fi
             case "$CONTENT_TYPE" in
                 video|season)
-                    if [ -z "$UI_BV" ] || [ "$UI_BV" = "-" ]; then
-                        fail "UI content start 缺少 BV"
+                    for spec in "UI BV:$UI_BV" "meta BV:$META_BV" "loadfile BV:$LOAD_BV"; do
+                        value=${spec#*: }
+                        if [ -z "$value" ] || [ "$value" = "-" ]; then
+                            fail "$spec 缺失"
+                        else
+                            pass "$spec"
+                        fi
+                    done
+                    if [ "$UI_BV" != "$META_BV" ] || [ "$UI_BV" != "$LOAD_BV" ]; then
+                        fail "video/season BV 不一致: ui=$UI_BV meta=$META_BV loadfile=$LOAD_BV"
                     else
-                        pass "UI content start 含 BV: $UI_BV"
-                    fi
-                    if [ -z "$META_BV" ] || [ "$META_BV" != "$UI_BV" ]; then
-                        fail "daemon meta BV 缺失或不一致: ui=$UI_BV meta=$META_BV"
-                    else
-                        pass "daemon meta BV 一致: $META_BV"
+                        pass "video/season BV 三处一致: $UI_BV"
                     fi
                     ;;
                 *)
-                    pass "非 video/season 场景不要求 BV"
+                    pass "content=$CONTENT_TYPE 不要求 BV"
                     ;;
             esac
-        fi
-        ;;
-esac
+            if [ -n "$UI_CID" ] && [ "$UI_CID" != "-" ] && [ "$UI_CID" != "0" ]; then
+                pass "content start cid=$UI_CID"
+            else
+                fail "content start 缺少有效 cid"
+            fi
+            if [ -n "$UI_QN" ] && [ "$UI_QN" != "-" ]; then
+                pass "content start qn=$UI_QN"
+            else
+                fail "content start 缺少 qn"
+            fi
+            if [ -n "$UI_ID" ] && [ "$UI_ID" != "-" ]; then
+                pass "content start id=$UI_ID"
+            else
+                fail "content start 缺少 id"
+            fi
+            if [ "$META_CID" = "$UI_CID" ] && [ "$META_QN" = "$UI_QN" ] && \
+               [ "$LOAD_CID" = "$UI_CID" ] && [ "$LOAD_QN" = "$UI_QN" ]; then
+                pass "cid/qn 在 UI/meta/loadfile 一致"
+            else
+                fail "cid/qn 不一致: ui=$UI_CID/$UI_QN meta=$META_CID/$META_QN loadfile=$LOAD_CID/$LOAD_QN"
+            fi
+
+            case "$SCENE" in
+                seek_forward|seek_backward)
+                    check_pattern wiliwili.log "][CMD]$PREFIX[gen= seek mode=" "CMD seek"
+                    check_pattern wiliwili.log "][EVT]$PREFIX[gen= seeked" "EVT seeked"
+                    ;;
+                pause_resume)
+                    check_pattern wiliwili.log "][CMD]$PREFIX[gen= set pause=" "CMD pause/resume"
+                    check_pattern wiliwili.log "][EVT]$PREFIX[gen= paused" "EVT paused"
+                    check_pattern wiliwili.log "][EVT]$PREFIX[gen= resumed" "EVT resumed"
+                    ;;
+            esac
+
+            if grep -F "END_FILE" "$RUN_DIR/wiliwili.log" >/dev/null 2>&1; then
+                check_pattern wiliwili.log "][UI]$PREFIX[gen=-][req=-] content end reason=" "content end"
+            fi
+            ;;
+        page_nav|none)
+            check_pattern wiliwili.log "][UI]$PREFIX[gen=-][req=-] content start content=page" "page content start"
+            check_pattern wiliwili.log "][UI]$PREFIX[gen=-][req=-] content end reason=user_stop" "page content end"
+            ;;
+        *)
+            pass "scene=$SCENE 暂无额外内容契约"
+            ;;
+    esac
+fi
 
 if grep -E 'upsig=|trid=|buvid=|[?][^ ]*[=]' "$RUN_DIR/wiliwili.log" >/dev/null 2>&1; then
     fail "统一日志含签名 URL 参数"
@@ -107,15 +199,16 @@ fi
 
 HEALTH_FORCE=$(sed -n 's/^health_force=//p' "$RUN_DIR/manifest.txt" 2>/dev/null | head -1)
 if [ "$HEALTH_FORCE" = "1" ]; then
-    check_pattern wiliwili.log "[mpv-compat][health]" "compat 软卡顿检测"
-    check_pattern wiliwili.log "[UI][health]" "播放页健康提示"
-    HEALTH_LINES=$(grep -c -F '[mpv-compat][health]' "$RUN_DIR/wiliwili.log" 2>/dev/null || true)
+    check_pattern wiliwili.log "][COMPAT][run=$RUN_ID]" "compat 统一行"
+    check_pattern wiliwili.log "health stall detected" "compat 软卡顿检测"
+    check_pattern wiliwili.log "health hint shown" "播放页健康提示"
+    HEALTH_LINES=$(grep -c -F 'health stall detected' "$RUN_DIR/wiliwili.log" 2>/dev/null || true)
     if [ "$HEALTH_LINES" -eq 1 ]; then
         pass "软卡顿提示每个 run 只发生一次"
     else
         fail "软卡顿提示次数=$HEALTH_LINES，期望 1"
     fi
-    if grep -E "watchdog 判定卡死|END_FILE\(ERROR\)" "$RUN_DIR/wiliwili.log" >/dev/null 2>&1; then
+    if grep -E "watchdog stall|END_FILE\(ERROR\)" "$RUN_DIR/wiliwili.log" >/dev/null 2>&1; then
         fail "软卡顿提示不应触发 watchdog 或 ERROR"
     else
         pass "软卡顿提示未触发 watchdog/ERROR"

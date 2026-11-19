@@ -7,6 +7,7 @@
 #include "activity/gallery_activity.hpp"
 #include "view/gallery_view.hpp"
 #include "utils/image_helper.hpp"
+#include "utils/debug_log.hpp"
 
 const std::string ImageGalleryItemXML = R"xml(
     <brls:Box
@@ -38,6 +39,17 @@ private:
 
 GalleryActivity::GalleryActivity(const std::vector<std::string>& data) : galleryData(data) {
     brls::Logger::debug("GalleryActivity: create");
+    std::string source;
+    for (const auto& url : data) {
+        auto end = url.find('?');
+        auto slash = url.rfind('/', end == std::string::npos ? url.size() : end);
+        if (slash != std::string::npos && slash + 1 < url.size())
+            source = url.substr(slash + 1, (end == std::string::npos ? url.size() : end) - slash - 1);
+        if (!source.empty()) break;
+    }
+    wiliwili::d27::reuseOrBeginSession(
+        "gallery", source.empty() ? "gallery" : source,
+        fmt::format("count={} source={}", data.size(), source.empty() ? "-" : source));
 }
 
 void GalleryActivity::onContentAvailable() {
