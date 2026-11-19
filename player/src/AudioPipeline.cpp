@@ -21,7 +21,7 @@ extern "C" {
 namespace sl {
 namespace {
 
-constexpr int kFrameMs = 20;
+constexpr int kFrameMs = 50;
 constexpr int kSinkRateHz = 48000; /* SLAudio.h: native frequency is 48000 Hz */
 constexpr size_t kPrerollLimit = 2 * 1024 * 1024;
 constexpr int kPacketQueueMax = 96;
