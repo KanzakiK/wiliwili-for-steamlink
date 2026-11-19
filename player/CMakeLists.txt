@@ -63,14 +63,17 @@ target_include_directories(compat_session_test PRIVATE
 target_compile_options(compat_session_test PRIVATE -Wall -Wextra -D_DEFAULT_SOURCE)
 target_link_libraries(compat_session_test PRIVATE pthread)
 
-# 兼容层独立验证程序（链 libmpv.a，模拟 wiliwili 调用序列）
-# 兼容层库路径由 -DMPV_COMPAT_LIB 指定，默认 ~/mpv-stub/lib/libmpv.a
-if(NOT MPV_COMPAT_LIB)
-    set(MPV_COMPAT_LIB $ENV{HOME}/mpv-stub/lib/libmpv.a)
+# 已封存的旧兼容层验证程序：只保留源码备查，默认不构建。
+# 它不能可靠反映音视频同步，禁止作为同步回归入口；新回归应基于真实 wiliwili 播放页。
+option(BUILD_DEPRECATED_COMPAT_TEST "Build archived compat_test lifecycle probe" OFF)
+if(BUILD_DEPRECATED_COMPAT_TEST)
+    if(NOT MPV_COMPAT_LIB)
+        set(MPV_COMPAT_LIB $ENV{HOME}/mpv-stub/lib/libmpv.a)
+    endif()
+    add_executable(compat_test ${PROJECT_SOURCE_DIR}/../tools/deprecated-tests/compat_test.c)
+    target_include_directories(compat_test PRIVATE
+        include
+        $ENV{HOME}/mpv-stub/include)
+    target_compile_options(compat_test PRIVATE -Wall -Wextra -D_DEFAULT_SOURCE)
+    target_link_libraries(compat_test PRIVATE ${MPV_COMPAT_LIB} pthread)
 endif()
-add_executable(compat_test daemon/compat_test.c)
-target_include_directories(compat_test PRIVATE
-    include
-    $ENV{HOME}/mpv-stub/include)
-target_compile_options(compat_test PRIVATE -Wall -Wextra -D_DEFAULT_SOURCE)
-target_link_libraries(compat_test PRIVATE ${MPV_COMPAT_LIB} pthread)

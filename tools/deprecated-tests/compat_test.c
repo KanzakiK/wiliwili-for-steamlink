@@ -1,4 +1,8 @@
 /*
+ * DEPRECATED / 已封存：不要用于音视频同步验收或作为回归脚本运行。
+ * 实测存在“有声音无画面 / 有画面无声音”的环境差异，只能作为历史 IPC/watchdog
+ * 生命周期探针备查。默认 CMake 目标已关闭，需显式 -DBUILD_DEPRECATED_COMPAT_TEST=ON。
+ *
  * compat_test - libmpv 兼容层独立验证程序（阶段 3.5a）
  *
  * 模拟 wiliwili 的真实调用序列，验证兼容层：
