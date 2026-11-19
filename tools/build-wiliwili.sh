@@ -4,7 +4,8 @@
 # 正式构建：sh tools/build-wiliwili.sh
 #   - SOURCE 默认就是本仓库根目录，正式包不包含 dev hook patch。
 #   - 11 个 wiliwili 正式修改已内源化，构建脚本只检查标记，不再应用 patch。
-#   - 2 个 borealis patch 必须在子模块上严格应用；缺失、失配或应用失败立即停止。
+#   - borealis 使用 KanzakiK/borealis 的 steamlink-port 分支，修改已在该 fork 内源化；
+#     构建只检查标记，不再应用 patch。
 #
 # Dev 构建：SL_DEV_BUILD=1 sh tools/build-wiliwili.sh
 #   额外严格应用 6 个 dev patch（--open-bv、P0 seek ×2、SL_MEDIA_TAG、
@@ -101,11 +102,13 @@ require_marker "$SOURCE/wiliwili/source/view/video_snapshot_core.cpp" 'SteamLink
 require_marker "$SOURCE/wiliwili/source/utils/config_helper.cpp" 'SteamLinkDanmakuDefault' 'danmaku area default'
 require_marker "$SOURCE/wiliwili/source/utils/config_helper.cpp" 'SteamLinkDanmakuFontDefault' 'danmaku font default'
 
-# 5) borealis 是子模块，两张 Steam Link 修改仍以严格 patch 应用。
-apply_strict "$PATCH_DIR/borealis-steamlink-alpha.patch" \
-    "$SOURCE/library/borealis" 'borealis steamlink alpha'
-apply_strict "$PATCH_DIR/borealis-nanovg-atlas-cap.patch" \
-    "$SOURCE/library/borealis" 'borealis nanovg atlas cap'
+# 5) borealis fork 已包含 Steam Link 修改，严格检查标记。
+require_marker "$SOURCE/library/borealis/library/lib/platforms/sdl/sdl_video.cpp" \
+    'SDL_GL_ALPHA_SIZE, 8' 'borealis transparent alpha'
+require_marker "$SOURCE/library/borealis/library/lib/platforms/sdl/sdl_video.cpp" \
+    'SL_TRANSPARENT' 'borealis transparent switch'
+require_marker "$SOURCE/library/borealis/library/lib/extern/nanovg/nanovg.c" \
+    'SteamLinkAtlasCap' 'borealis nanovg atlas cap'
 
 # 6) dev hook：默认不应用，避免正式包携带测试入口。
 if [ "${SL_DEV_BUILD:-0}" = "1" ]; then
