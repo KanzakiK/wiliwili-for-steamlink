@@ -561,14 +561,18 @@ void Player::Impl::run() {
     /* D23 验收诊断：seek 入口到视频首帧提交的墙钟间隔，只在 --diag 下输出。 */
     std::int64_t lastSeekStartMs = 0;
     const bool playDiag = std::getenv("SL_PLAY_DIAG") != nullptr;
-    /* seek 后队列长期不稳定时的音频兜底，默认沿用既有 8s 量级；
-     * 只作为异常保护，正常路径必须走队列稳定分支。 */
-    int seekAudioFallbackMs = 8000;
-    if (const char* fallback = std::getenv("SL_SEEK_AUDIO_FALLBACK_MS")) {
-        int value = std::atoi(fallback);
+    /* 同步失败判据：只看呈现位置是否持续推进，不看墙钟总耗时。
+     * 慢但在推进的内容继续等；只有高水位长时间不动才判失败。 */
+    constexpr double kSyncProgressStepMs = 100.0;
+    int syncNoProgressMs = 5000;
+    if (const char* noProgress = std::getenv("SL_SYNC_NO_PROGRESS_MS")) {
+        int value = std::atoi(noProgress);
         if (value >= 1000)
-            seekAudioFallbackMs = value;
+            syncNoProgressMs = value;
     }
+    bool syncWatchActive = false;
+    double syncHighWaterMs = 0.0;
+    std::int64_t lastSyncProgressMs = 0;
     uint32_t queueMax = 0;
     int queueFlatFrames = 0;
     int videoFrames = 0;
@@ -1028,6 +1032,7 @@ void Player::Impl::run() {
         audioScheduled = false;
         audioPendingPosition = false;
         audioStartPositionMs = 0.0;
+        syncWatchActive = false;
         queueMax = 0;
         queueFlatFrames = 0;
         maxSubmittedMs = target * 1000.0;
@@ -1090,6 +1095,7 @@ void Player::Impl::run() {
             audioScheduled = false;
             audioPendingPosition = false;
             audioStartPositionMs = 0.0;
+            syncWatchActive = false;
             queueMax = 0;
             queueFlatFrames = 0;
             maxSubmittedMs = at * 1000.0;
@@ -1412,24 +1418,35 @@ void Player::Impl::run() {
                                 audioStartPositionMs, presentationMs, skipMs);
                     }
 
-                    const bool seekFallback =
-                        (afterSeek || audioPendingPosition) && firstFrameAfterSeekRecorded &&
-                        steadyNowMs() - lastSeekStartMs >= seekAudioFallbackMs;
-                    if (audioReady && !audioScheduled &&
-                        ((!afterSeek && submittedMs > 8000.0) || seekFallback)) {
-                        double offsetMs = presentationMs - audioBaseMs;
-                        int skipMs = (int)std::max(0.0, std::min(offsetMs, 10000.0));
-                        int delayMs = (int)std::max(0.0, std::min(-offsetMs, 5000.0));
-                        audio_.setPaused(false);
-                        audio_.scheduleStart(delayMs, skipMs);
-                        audioScheduled = true;
-                        audioPendingPosition = false;
-                        afterSeek = false;
-                        fprintf(stderr,
-                                "[SlPlayer] %s队列迟迟未稳定，音频兜底启动: "
-                                "present=%.0f ms base=%.0f ms delay=%d ms skip=%d ms\n",
-                                seekFallback ? "seek " : "",
-                                presentationMs, audioBaseMs, delayMs, skipMs);
+                    /* 同步等待只允许失败，不允许绕过对齐强行出声。
+                     * 判据是呈现位置高水位是否推进：慢但在走就继续等，
+                     * 完全停住超过阈值才报 Error 并结束播放。 */
+                    const bool syncWaiting =
+                        audioReady && !audioScheduled && videoStarted && !paused_.load();
+                    if (!syncWaiting) {
+                        syncWatchActive = false;
+                    } else {
+                        const std::int64_t syncNow = steadyNowMs();
+                        if (!syncWatchActive) {
+                            syncWatchActive = true;
+                            syncHighWaterMs = presentationMs;
+                            lastSyncProgressMs = syncNow;
+                        } else if (presentationMs >= syncHighWaterMs + kSyncProgressStepMs) {
+                            syncHighWaterMs = presentationMs;
+                            lastSyncProgressMs = syncNow;
+                        } else if (syncNow - lastSyncProgressMs >= syncNoProgressMs) {
+                            char detail[256];
+                            std::snprintf(detail, sizeof(detail),
+                                          "音视频对齐失败: present=%.0f target=%.0f "
+                                          "high=%.0f queue=%u frames=%d stage=%d "
+                                          "no_progress=%dms",
+                                          presentationMs, audioBaseMs, syncHighWaterMs,
+                                          queuedNow, videoFrames, stage_.load(),
+                                          syncNoProgressMs);
+                            fprintf(stderr, "[SlPlayer] %s，结束播放\n", detail);
+                            fail(detail);
+                            return;
+                        }
                     }
 
                     stage_ = 42;
