@@ -108,7 +108,7 @@ else
 
             START_LINE=$(grep -F "][UI]$PREFIX[gen=-][req=-] content start" "$RUN_DIR/wiliwili.log" 2>/dev/null | head -1)
             META_LINE=$(grep -F "$PREFIX" "$RUN_DIR/wiliwili.log" 2>/dev/null | grep -F "meta ok" | head -1)
-            LOAD_LINE=$(grep -F "$PREFIX" "$RUN_DIR/wiliwili.log" 2>/dev/null | grep -F " loadfile " | head -1)
+            LOAD_LINE=$(grep -F "$PREFIX" "$RUN_DIR/wiliwili.log" 2>/dev/null | grep -F " loadfile url=" | head -1)
 
             CONTENT_TYPE=$(field_from "$START_LINE" content)
             UI_ID=$(field_from "$START_LINE" id)
@@ -167,13 +167,13 @@ else
 
             case "$SCENE" in
                 seek_forward|seek_backward)
-                    check_pattern wiliwili.log "][CMD]$PREFIX[gen= seek mode=" "CMD seek"
-                    check_pattern wiliwili.log "][EVT]$PREFIX[gen= seeked" "EVT seeked"
+                    check_both wiliwili.log "$PREFIX" "seek mode=" "CMD seek"
+                    check_both wiliwili.log "$PREFIX" "seeked" "EVT seeked"
                     ;;
                 pause_resume)
-                    check_pattern wiliwili.log "][CMD]$PREFIX[gen= set pause=" "CMD pause/resume"
-                    check_pattern wiliwili.log "][EVT]$PREFIX[gen= paused" "EVT paused"
-                    check_pattern wiliwili.log "][EVT]$PREFIX[gen= resumed" "EVT resumed"
+                    check_both wiliwili.log "$PREFIX" "set pause=" "CMD pause/resume"
+                    check_both wiliwili.log "$PREFIX" "paused" "EVT paused"
+                    check_both wiliwili.log "$PREFIX" "resumed" "EVT resumed"
                     ;;
             esac
 
