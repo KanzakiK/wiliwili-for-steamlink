@@ -18,6 +18,9 @@ extern "C" {
 #endif
 
 #include <stdint.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <string.h>
 
 /* socket 路径。daemon bind，兼容层 connect。
  * 用环境变量 SL_IPC_SOCKET 可覆盖（多实例/测试用）。 */
@@ -41,6 +44,87 @@ extern "C" {
 #define SL_IPC_FRAME_FILE_GEN_FIELD 1
 #define SL_IPC_FRAME_REQUEST_FIELD  2
 #define SL_IPC_FRAME_ARGS_FIELD     3
+
+/* ---- D27 调试会话元数据 ----
+ * run/session/content/id 由 dev 构建的 UI 侧生成，经 loadfile extra 进入兼容层，
+ * 兼容层在 open 前发送 meta 命令；daemon 按 generation 保存并用于日志前缀。
+ * 字段值不含 TAB、换行、逗号和 '='，不携带签名 URL 或任何查询参数。
+ */
+#define SL_CMD_META        "meta"      /* meta<TAB>gen<TAB>req<TAB>run=<id><TAB>session=<id><TAB>content=<type><TAB>id=<primary> */
+#define SL_META_RUN_KEY    "run"
+#define SL_META_SESSION_KEY "session"
+#define SL_META_CONTENT_KEY "content"
+#define SL_META_ID_KEY      "id"
+#define SL_META_FIELD_MAX   128
+
+typedef struct {
+    char run[SL_META_FIELD_MAX];
+    char session[SL_META_FIELD_MAX];
+    char content[SL_META_FIELD_MAX];
+    char id[SL_META_FIELD_MAX];
+} sl_session_meta_t;
+
+static inline void sl_session_meta_clear(sl_session_meta_t *meta) {
+    if (meta)
+        memset(meta, 0, sizeof(*meta));
+}
+
+/* 解析 UI extra 中的调试字段：run=...,session=...,content=...,id=...。
+ * extra 还包含 referrer/start/audio-file 等键；未知键一律忽略。
+ * 返回 1 表示四个字段齐全，0 表示缺少字段，-1 表示字段过长或非法。 */
+static inline int sl_session_meta_parse_extra(const char *extra, sl_session_meta_t *meta) {
+    if (!extra || !meta)
+        return 0;
+    sl_session_meta_clear(meta);
+    const char *p = extra;
+    while (*p) {
+        const char *comma = strchr(p, ',');
+        size_t len = comma ? (size_t)(comma - p) : strlen(p);
+        if (len > 0 && len < 512) {
+            char pair[512];
+            memcpy(pair, p, len);
+            pair[len] = '\0';
+            char *eq = strchr(pair, '=');
+            if (eq) {
+                *eq = '\0';
+                const char *key = pair;
+                const char *value = eq + 1;
+                char *dst = NULL;
+                if (strcmp(key, SL_META_RUN_KEY) == 0)
+                    dst = meta->run;
+                else if (strcmp(key, SL_META_SESSION_KEY) == 0)
+                    dst = meta->session;
+                else if (strcmp(key, SL_META_CONTENT_KEY) == 0)
+                    dst = meta->content;
+                else if (strcmp(key, SL_META_ID_KEY) == 0)
+                    dst = meta->id;
+                if (dst) {
+                    if (!*value || strchr(value, '=') || strchr(value, ' ') ||
+                        snprintf(dst, SL_META_FIELD_MAX, "%s", value) >= SL_META_FIELD_MAX)
+                        return -1;
+                }
+            }
+        }
+        if (!comma)
+            break;
+        p = comma + 1;
+    }
+    return meta->run[0] && meta->session[0] && meta->content[0] && meta->id[0] ? 1 : 0;
+}
+
+/* 生成 meta 命令参数字段；返回写入长度，cap 不足时返回 0。 */
+static inline size_t sl_session_meta_format_args(const sl_session_meta_t *meta,
+                                                 char *dst, size_t cap) {
+    if (!meta || !dst || cap == 0)
+        return 0;
+    int n = snprintf(dst, cap,
+                     "%s=%s\t%s=%s\t%s=%s\t%s=%s",
+                     SL_META_RUN_KEY, meta->run,
+                     SL_META_SESSION_KEY, meta->session,
+                     SL_META_CONTENT_KEY, meta->content,
+                     SL_META_ID_KEY, meta->id);
+    return n > 0 && (size_t)n < cap ? (size_t)n : 0;
+}
 
 /* ---- 命令（兼容层 -> daemon）---- */
 #define SL_CMD_OPEN     "open"     /* open<TAB>gen<TAB>req<TAB>videoUrl<TAB>referrer<TAB>start<TAB>end<TAB>audioUrl1... */

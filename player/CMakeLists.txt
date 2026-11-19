@@ -48,6 +48,11 @@ add_executable(ipc_probe daemon/ipc_probe.c)
 target_include_directories(ipc_probe PRIVATE include)
 target_compile_options(ipc_probe PRIVATE -Wall -Wextra -D_DEFAULT_SOURCE)
 
+# D27 session 元数据契约测试（纯 C，无SDK依赖，可在主机或交叉环境编译）
+add_executable(session_meta_test test/session_meta_test.c)
+target_include_directories(session_meta_test PRIVATE include)
+target_compile_options(session_meta_test PRIVATE -Wall -Wextra)
+
 # 兼容层独立验证程序（链 libmpv.a，模拟 wiliwili 调用序列）
 # 兼容层库路径由 -DMPV_COMPAT_LIB 指定，默认 ~/mpv-stub/lib/libmpv.a
 if(NOT MPV_COMPAT_LIB)
