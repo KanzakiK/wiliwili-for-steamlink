@@ -79,7 +79,7 @@ cd /home/apps/wiliwili || exit 1
 # 每次启动先记一行基线，事后复盘不必靠猜。
 : > /tmp/wiliwili.log
 {
-    echo "[boot] $(date) MemFree=$(awk '/MemFree/{print $2}' /proc/meminfo)kB Shmem=$(awk '/Shmem/{print $2}' /proc/meminfo)kB"
+    echo "[boot] run=${SL_DEBUG_RUN_ID:-main} $(date) MemFree=$(awk '/MemFree/{print $2}' /proc/meminfo)kB Shmem=$(awk '/Shmem/{print $2}' /proc/meminfo)kB"
     df -h /tmp | tail -1 | sed 's/^/[boot] tmpfs /'
 } >> /tmp/wiliwili.log
 
