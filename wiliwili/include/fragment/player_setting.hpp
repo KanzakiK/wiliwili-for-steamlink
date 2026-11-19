@@ -84,6 +84,8 @@ private:
 
     // equalizer setting
     BRLS_BIND(brls::RadioCell, btnEqualizerReset, "setting/equalizer/reset");
+    BRLS_BIND(brls::Header, equalizerHeader, "setting/equalizer/header");
+    BRLS_BIND(brls::Box, equalizerBox, "setting/equalizer/box");
     BRLS_BIND(brls::SliderCell, btnEqualizerBrightness, "setting/equalizer/brightness");
     BRLS_BIND(brls::SliderCell, btnEqualizerContrast, "setting/equalizer/contrast");
     BRLS_BIND(brls::SliderCell, btnEqualizerSaturation, "setting/equalizer/saturation");

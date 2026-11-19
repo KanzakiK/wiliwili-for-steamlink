@@ -1169,8 +1169,40 @@ void MPVCore::reset() {
     setFrameSize(rect);
 }
 
+// D27: 统一日志脱敏。URL 只保留静态文件名，extra 只保留键名。
+// 禁止 upsig/trid/buvid/audio-file URL 等签名参数进入日志。
+static std::string slSafeUrlForLog(const std::string &url) {
+    size_t query = url.find('?');
+    std::string path = query == std::string::npos ? url : url.substr(0, query);
+    size_t slash = path.rfind('/');
+    return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
+static std::string slSafeExtraKeysForLog(const std::string &extra) {
+    std::string keys, key;
+    bool inQuote = false;
+    for (size_t i = 0; i <= extra.size(); ++i) {
+        char c = i < extra.size() ? extra[i] : '\0';
+        if (c == '"') {
+            inQuote = !inQuote;
+        } else if ((c == ',' && !inQuote) || c == '\0') {
+            size_t eq = key.find('=');
+            if (eq != std::string::npos) {
+                if (!keys.empty()) keys += ',';
+                keys += key.substr(0, eq);
+            }
+            key.clear();
+            if (c == '\0') break;
+        } else {
+            key += c;
+        }
+    }
+    return keys;
+}
+
 void MPVCore::setUrl(const std::string &url, const std::string &extra, const std::string &method) {
-    brls::Logger::debug("{} Url: {}, extra: {}", method, url, extra);
+    brls::Logger::debug("{} Url: {}, extra keys: {}", method,
+                        slSafeUrlForLog(url), slSafeExtraKeysForLog(extra));
     if (extra.empty()) {
         command_async("loadfile", url, method);
     } else {

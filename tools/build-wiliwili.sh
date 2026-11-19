@@ -1,7 +1,16 @@
 #!/bin/sh
-# 交叉编译 wiliwili 整仓（阶段 3.2：MPV 桩库 + 原生 UI）
+# 交叉编译 wiliwili 整仓。
 #
-# 用法：sh tools/build-wiliwili.sh
+# 正式构建：sh tools/build-wiliwili.sh
+#   - SOURCE 默认就是本仓库根目录，正式包不包含 dev hook patch。
+#   - 11 个 wiliwili 正式修改已内源化，构建脚本只检查标记，不再应用 patch。
+#   - 2 个 borealis patch 必须在子模块上严格应用；缺失、失配或应用失败立即停止。
+#
+# Dev 构建：SL_DEV_BUILD=1 sh tools/build-wiliwili.sh
+#   额外严格应用 6 个 dev patch（--open-bv、P0 seek ×2、SL_MEDIA_TAG、
+#   debug session、debug controller）。这些 patch 会修改 SOURCE 工作树，
+#   建议在 SOURCE_DIR 指向的临时 worktree 中使用。
+#
 # 产物：~/build-wiliwili/wiliwili（资源在 ~/build-wiliwili/resources）
 set -e
 
@@ -13,10 +22,40 @@ export MARVELL_SDK_PATH=${MARVELL_SDK_PATH:-$HOME/steamlink-sdk}
 export MARVELL_ROOTFS=${MARVELL_ROOTFS:-$HOME/steamlink-sdk/rootfs}
 
 PROJECT_DIR=${PROJECT_DIR:-/mnt/d/bilibili-steamlink}
+PATCH_DIR=$PROJECT_DIR/tools/patches
 STUB=$HOME/mpv-stub
 STUB_SRC=$PROJECT_DIR/tools/mpv-stub/mpv_stub.c
-SOURCE=${SOURCE_DIR:-$HOME/refs/wiliwili}
+SOURCE=${SOURCE_DIR:-$PROJECT_DIR}
 BUILD=${BUILD_DIR:-$HOME/build-wiliwili}
+
+die() {
+    echo "ERROR: $*" >&2
+    exit 1
+}
+
+require_marker() {
+    file=$1
+    marker=$2
+    label=$3
+    [ -f "$file" ] || die "$label: 文件不存在 $file"
+    grep -q "$marker" "$file" || die "$label: 缺少内源化标记 '$marker' ($file)"
+    echo "ok: $label"
+}
+
+apply_strict() {
+    patch=$1
+    dir=$2
+    label=$3
+    [ -f "$patch" ] || die "$label: patch 不存在 $patch"
+    [ -d "$dir" ] || die "$label: 源码目录不存在 $dir"
+    if git -C "$dir" apply --reverse --check --recount "$patch" >/dev/null 2>&1; then
+        echo "already applied: $label"
+        return
+    fi
+    git -C "$dir" apply --check --recount "$patch" || die "$label: patch 失配 $patch"
+    git -C "$dir" apply --recount "$patch" || die "$label: patch 应用失败 $patch"
+    echo "applied: $label"
+}
 
 # 1) mpv 头文件（v0.37.0）
 mkdir -p "$STUB/include/mpv" "$STUB/lib" "$STUB/build"
@@ -28,8 +67,7 @@ for f in client.h render.h render_gl.h; do
     fi
 done
 
-# 2) libmpv 兼容层静态库（阶段 3.5a：IPC 客户端，驱动 slplayer_daemon）
-#    协议头与 daemon 共享，复制到 stub include 目录供编译
+# 2) libmpv 兼容层静态库（IPC 客户端，不链进正式 wiliwili 以外的进程）
 cp -f "$PROJECT_DIR/player/include/IpcProtocol.h" "$STUB/include/IpcProtocol.h"
 if [ ! -f "$STUB/lib/libmpv.a" ] || [ "$STUB_SRC" -nt "$STUB/lib/libmpv.a" ] \
    || [ "$PROJECT_DIR/player/include/IpcProtocol.h" -nt "$STUB/lib/libmpv.a" ]; then
@@ -40,179 +78,53 @@ if [ ! -f "$STUB/lib/libmpv.a" ] || [ "$STUB_SRC" -nt "$STUB/lib/libmpv.a" ] \
     armv7a-cros-linux-gnueabi-ar rcs "$STUB/lib/libmpv.a" "$STUB/build/mpv_stub.o"
 fi
 
-# 3) borealis 透明层补丁（GL 层 alpha=8 + SL_TRANSPARENT 透明 clear）
-BOREALIS_DIR="$SOURCE/library/borealis"
-BOREALIS_PATCH="$PROJECT_DIR/tools/patches/borealis-steamlink-alpha.patch"
-if [ -e "$BOREALIS_DIR/.git" ]; then
-    if ! git -C "$BOREALIS_DIR" apply --reverse --check "$BOREALIS_PATCH" >/dev/null 2>&1; then
-        echo "apply borealis steamlink alpha patch"
-        git -C "$BOREALIS_DIR" apply "$BOREALIS_PATCH"
+# 3) 源码来源：默认就是本仓库。clean clone 缺子模块时自动初始化。
+[ -f "$SOURCE/CMakeLists.txt" ] || die "源码目录缺少 CMakeLists.txt: $SOURCE"
+if [ "$SOURCE" = "$PROJECT_DIR" ] && \
+   [ ! -f "$SOURCE/library/borealis/library/cmake/commonOption.cmake" ]; then
+    echo "init submodules"
+    git -C "$SOURCE" submodule update --init --recursive
+fi
+[ -f "$SOURCE/library/borealis/library/cmake/commonOption.cmake" ] || \
+    die "borealis 子模块缺失: $SOURCE/library/borealis"
+
+# 4) 正式修改已内源化：严格检查标记，避免误用未内源化的旧源码树。
+require_marker "$SOURCE/wiliwili/source/view/mpv_core.cpp" 'slSafeUrlForLog' 'debug log redaction'
+require_marker "$SOURCE/wiliwili/include/utils/image_helper.hpp" '"@320w_180h_1c"' 'image size'
+require_marker "$SOURCE/wiliwili/source/utils/config_helper.cpp" 'WILI_VIDEO_QUALITY_LANDSCAPE_MAX 116' 'capability caps'
+require_marker "$SOURCE/wiliwili/include/view/video_view.hpp" 'aliveToken' 'VideoView UAF fix'
+require_marker "$SOURCE/wiliwili/source/view/video_view.cpp" 'SteamLinkHideSpeed' 'hide speed button'
+require_marker "$SOURCE/wiliwili/include/api/bilibili/result/dynamic_video.h" 'std::string mid;' 'dynamic mid string'
+require_marker "$SOURCE/wiliwili/source/view/video_view.cpp" 'SteamLinkBottomBarGuard' 'bottom bar NaN guard'
+require_marker "$SOURCE/wiliwili/source/utils/config_helper.cpp" 'SteamLinkDefaults' 'Steam Link defaults'
+require_marker "$SOURCE/wiliwili/source/view/video_snapshot_core.cpp" 'SteamLinkSnapshotDownscale' 'snapshot downscale'
+require_marker "$SOURCE/wiliwili/source/utils/config_helper.cpp" 'SteamLinkDanmakuDefault' 'danmaku area default'
+require_marker "$SOURCE/wiliwili/source/utils/config_helper.cpp" 'SteamLinkDanmakuFontDefault' 'danmaku font default'
+
+# 5) borealis 是子模块，两张 Steam Link 修改仍以严格 patch 应用。
+apply_strict "$PATCH_DIR/borealis-steamlink-alpha.patch" \
+    "$SOURCE/library/borealis" 'borealis steamlink alpha'
+apply_strict "$PATCH_DIR/borealis-nanovg-atlas-cap.patch" \
+    "$SOURCE/library/borealis" 'borealis nanovg atlas cap'
+
+# 6) dev hook：默认不应用，避免正式包携带测试入口。
+if [ "${SL_DEV_BUILD:-0}" = "1" ]; then
+    if [ "$SOURCE" = "$PROJECT_DIR" ]; then
+        echo "WARNING: SL_DEV_BUILD=1 会修改仓库内源码，建议使用 SOURCE_DIR=<worktree>" >&2
     fi
+    for p in wiliwili-open-bv-test.patch \
+             wiliwili-p0-seek-test.patch \
+             wiliwili-p0-seek-test-absolute.patch \
+             wiliwili-media-tag.patch \
+             wiliwili-debug-session.patch \
+             wiliwili-debug-controller.patch; do
+        apply_strict "$PATCH_DIR/$p" "$SOURCE" "$p"
+    done
+else
+    echo "dev hooks disabled (set SL_DEV_BUILD=1 to enable)"
 fi
 
-# 3b) 真机回归用 --open-bv 入口：只调用 wiliwili 现有 Intent::openBV()，
-# 不替换播放链路；用于从正常主菜单启动流程直接打开指定 BV 做端到端验证。
-OPEN_BV_PATCH="$PROJECT_DIR/tools/patches/wiliwili-open-bv-test.patch"
-if [ -f "$OPEN_BV_PATCH" ] && [ -d "$SOURCE/.git" ]; then
-    if ! grep -q '"--open-bv"' "$SOURCE/wiliwili/source/main.cpp" 2>/dev/null; then
-        echo "apply wiliwili --open-bv test hook"
-        git -C "$SOURCE" apply "$OPEN_BV_PATCH"
-    fi
-fi
-
-# P0 真机复现：起播后自动执行固定 pause/resume + 长 seek 序列。
-SEEK_TEST_PATCH="$PROJECT_DIR/tools/patches/wiliwili-p0-seek-test.patch"
-if [ -f "$SEEK_TEST_PATCH" ] && [ -d "$SOURCE/.git" ]; then
-    if ! grep -q 'SL_TEST_SEEK_SEQUENCE' "$SOURCE/wiliwili/source/main.cpp" 2>/dev/null; then
-        echo "apply wiliwili P0 seek reproducer"
-        git -C "$SOURCE" apply "$SEEK_TEST_PATCH"
-    fi
-fi
-
-SEEK_ABS_PATCH="$PROJECT_DIR/tools/patches/wiliwili-p0-seek-test-absolute.patch"
-if [ -f "$SEEK_ABS_PATCH" ] && [ -d "$SOURCE/.git" ]; then
-    if ! grep -q 'MPVCore::instance().seek(60)' "$SOURCE/wiliwili/source/main.cpp" 2>/dev/null; then
-        echo "apply wiliwili P0 seek reproducer absolute targets"
-        git -C "$SOURCE" apply "$SEEK_ABS_PATCH"
-    fi
-fi
-
-MEDIA_TAG_PATCH="$PROJECT_DIR/tools/patches/wiliwili-media-tag.patch"
-if [ -f "$MEDIA_TAG_PATCH" ] && [ -d "$SOURCE/.git" ]; then
-    if ! grep -q 'SL_MEDIA_TAG' "$SOURCE/wiliwili/source/main.cpp" 2>/dev/null; then
-        echo "apply wiliwili media tag test hook"
-        git -C "$SOURCE" apply "$MEDIA_TAG_PATCH"
-    fi
-fi
-
-# D27：统一日志脱敏，禁止把签名 URL / extra 值写进 /tmp/wiliwili.log。
-LOG_REDACTION_PATCH="$PROJECT_DIR/tools/patches/wiliwili-debug-log-redaction.patch"
-if [ -f "$LOG_REDACTION_PATCH" ] && [ -d "$SOURCE/.git" ]; then
-    if ! grep -q 'slSafeUrlForLog' "$SOURCE/wiliwili/source/view/mpv_core.cpp" 2>/dev/null; then
-        echo "apply wiliwili debug log redaction patch"
-        git -C "$SOURCE" apply --recount "$LOG_REDACTION_PATCH"
-    fi
-fi
-
-# D27：UI 侧权威 session。只在 SL_DEBUG_RUN_ID 存在时生成，正式启动路径不写字段。
-DEBUG_SESSION_PATCH="$PROJECT_DIR/tools/patches/wiliwili-debug-session.patch"
-if [ -f "$DEBUG_SESSION_PATCH" ] && [ -d "$SOURCE/.git" ]; then
-    if ! grep -q 'setDebugSession' "$SOURCE/wiliwili/include/view/video_view.hpp" 2>/dev/null; then
-        echo "apply wiliwili debug session patch"
-        git -C "$SOURCE" apply --recount "$DEBUG_SESSION_PATCH"
-    fi
-fi
-
-# D27：启动期 debug 场景控制器。只在 SL_DEBUG_RUN_ID/SCENE 存在时执行。
-DEBUG_CONTROLLER_PATCH="$PROJECT_DIR/tools/patches/wiliwili-debug-controller.patch"
-if [ -f "$DEBUG_CONTROLLER_PATCH" ] && [ -d "$SOURCE/.git" ]; then
-    if ! grep -q 'd27ExpectPlaying' "$SOURCE/wiliwili/source/main.cpp" 2>/dev/null; then
-        echo "apply wiliwili debug controller patch"
-        git -C "$SOURCE" apply --recount "$DEBUG_CONTROLLER_PATCH"
-    fi
-fi
-
-# D16：按 Steam Link 实际显示尺寸收敛图片请求，降低 JPEG 解码和 GPU 纹理占用。
-# 只改请求后缀常量，不改 wiliwili 布局/样式/Activity 行为。
-IMAGE_SIZE_PATCH="$PROJECT_DIR/tools/patches/wiliwili-image-size.patch"
-if [ -f "$IMAGE_SIZE_PATCH" ] && [ -d "$SOURCE/.git" ]; then
-    if ! grep -q '"@320w_180h_1c"' "$SOURCE/wiliwili/include/utils/image_helper.hpp" 2>/dev/null; then
-        echo "apply wiliwili image size patch"
-        git -C "$SOURCE" apply "$IMAGE_SIZE_PATCH"
-    fi
-fi
-
-# Steam Link 解码能力卡位：视频最高 1080P60 (qn=116)，音频仅 AAC 高/中/低三档。
-# 用构建补丁约束上游选项，不改 UI 布局/样式，也不改 wiliwili 播放链路。
-CAPABILITY_CAPS_PATCH="$PROJECT_DIR/tools/patches/wiliwili-capability-caps.patch"
-if [ -f "$CAPABILITY_CAPS_PATCH" ] && [ -d "$SOURCE/.git" ]; then
-    if ! grep -q 'WILI_VIDEO_QUALITY_LANDSCAPE_MAX 116' "$SOURCE/wiliwili/source/utils/config_helper.cpp" 2>/dev/null; then
-        echo "apply wiliwili capability caps patch"
-        git -C "$SOURCE" apply --recount "$CAPABILITY_CAPS_PATCH"
-    fi
-fi
-
-# D18：回移上游 PR #692 的 VideoView 事件重复订阅 UAF 修复（return + aliveToken）。
-VIDEO_VIEW_UAF_PATCH="$PROJECT_DIR/tools/patches/wiliwili-video-view-event-uaf.patch"
-if [ -f "$VIDEO_VIEW_UAF_PATCH" ] && [ -d "$SOURCE/.git" ]; then
-    if ! grep -q 'aliveToken' "$SOURCE/wiliwili/include/view/video_view.hpp" 2>/dev/null; then
-        echo "apply wiliwili VideoView UAF patch"
-        git -C "$SOURCE" apply --recount "$VIDEO_VIEW_UAF_PATCH"
-    fi
-fi
-
-# D17：SLVideo 不支持播放倍速，隐藏播放页 OSD 倍速入口并清除焦点。
-HIDE_SPEED_PATCH="$PROJECT_DIR/tools/patches/wiliwili-hide-speed-button.patch"
-if [ -f "$HIDE_SPEED_PATCH" ] && [ -d "$SOURCE/.git" ]; then
-    if ! grep -q 'SteamLinkHideSpeed' "$SOURCE/wiliwili/source/view/video_view.cpp" 2>/dev/null; then
-        echo "apply wiliwili hide speed button patch"
-        git -C "$SOURCE" apply --recount "$HIDE_SPEED_PATCH"
-    fi
-fi
-
-# D13：回移上游 2f583df，关注 UP 的 mid 可能是字符串，按字符串解析再转换。
-DYNAMIC_MID_PATCH="$PROJECT_DIR/tools/patches/wiliwili-dynamic-mid-string.patch"
-if [ -f "$DYNAMIC_MID_PATCH" ] && [ -d "$SOURCE/.git" ]; then
-    if ! grep -q 'std::string mid;' "$SOURCE/wiliwili/include/api/bilibili/result/dynamic_video.h" 2>/dev/null; then
-        echo "apply wiliwili dynamic mid string patch"
-        git -C "$SOURCE" apply --recount "$DYNAMIC_MID_PATCH"
-    fi
-fi
-
-# D20：详情页加载期 duration=0 会让底部进度条宽度变成 NaN 并铺满整屏粉色。
-BOTTOM_BAR_GUARD_PATCH="$PROJECT_DIR/tools/patches/wiliwili-bottom-bar-nan.patch"
-if [ -f "$BOTTOM_BAR_GUARD_PATCH" ] && [ -d "$SOURCE/.git" ]; then
-    if ! grep -q 'SteamLinkBottomBarGuard' "$SOURCE/wiliwili/source/view/video_view.cpp" 2>/dev/null; then
-        echo "apply wiliwili bottom bar NaN guard patch"
-        git -C "$SOURCE" apply --recount "$BOTTOM_BAR_GUARD_PATCH"
-    fi
-fi
-
-# Steam Link 默认值：图片线程/缓存、TLS、自动全屏、弹幕倍率等按真机配置固化。
-STEAM_DEFAULTS_PATCH="$PROJECT_DIR/tools/patches/wiliwili-steamlink-defaults.patch"
-if [ -f "$STEAM_DEFAULTS_PATCH" ] && [ -d "$SOURCE/.git" ]; then
-    if ! grep -q 'SteamLinkDefaults' "$SOURCE/wiliwili/source/utils/config_helper.cpp" 2>/dev/null; then
-        echo "apply wiliwili Steam Link defaults patch"
-        git -C "$SOURCE" apply --recount "$STEAM_DEFAULTS_PATCH"
-    fi
-fi
-
-# 进度条预览雪碧图按显示尺寸降采样，避免 4800x2700 RGBA 占用 51.84MB SHM。
-ATLAS_CAP_PATCH="$PROJECT_DIR/tools/patches/borealis-nanovg-atlas-cap.patch"
-if [ -f "$ATLAS_CAP_PATCH" ] && [ -e "$SOURCE/library/borealis/.git" ]; then
-    if ! grep -q 'SteamLinkAtlasCap' "$SOURCE/library/borealis/library/lib/extern/nanovg/nanovg.c" 2>/dev/null; then
-        echo "apply borealis nanovg atlas cap patch"
-        git -C "$SOURCE/library/borealis" apply --recount "$ATLAS_CAP_PATCH"
-    fi
-fi
-
-SNAPSHOT_DOWNSCALE_PATCH="$PROJECT_DIR/tools/patches/wiliwili-snapshot-downscale.patch"
-if [ -f "$SNAPSHOT_DOWNSCALE_PATCH" ] && [ -d "$SOURCE/.git" ]; then
-    if ! grep -q 'SteamLinkSnapshotDownscale' "$SOURCE/wiliwili/source/view/video_snapshot_core.cpp" 2>/dev/null; then
-        echo "apply wiliwili snapshot downscale patch"
-        git -C "$SOURCE" apply --recount "$SNAPSHOT_DOWNSCALE_PATCH"
-    fi
-fi
-
-# 弹幕显示区域默认 1/4，但保留 1/2、3/4、全屏选项供用户自行选择。
-DANMAKU_DEFAULT_PATCH="$PROJECT_DIR/tools/patches/wiliwili-danmaku-area-default.patch"
-if [ -f "$DANMAKU_DEFAULT_PATCH" ] && [ -d "$SOURCE/.git" ]; then
-    if ! grep -q 'SteamLinkDanmakuDefault' "$SOURCE/wiliwili/source/utils/config_helper.cpp" 2>/dev/null; then
-        echo "apply wiliwili danmaku area default patch"
-        git -C "$SOURCE" apply --recount "$DANMAKU_DEFAULT_PATCH"
-    fi
-fi
-
-# 弹幕字体默认纯色，避免描边档的二次文本绘制和字形膨胀；用户仍可切回描边/阴影/斜体。
-DANMAKU_FONT_DEFAULT_PATCH="$PROJECT_DIR/tools/patches/wiliwili-danmaku-font-default.patch"
-if [ -f "$DANMAKU_FONT_DEFAULT_PATCH" ] && [ -d "$SOURCE/.git" ]; then
-    if ! grep -q 'SteamLinkDanmakuFontDefault' "$SOURCE/wiliwili/source/utils/config_helper.cpp" 2>/dev/null; then
-        echo "apply wiliwili danmaku font default patch"
-        git -C "$SOURCE" apply --recount "$DANMAKU_FONT_DEFAULT_PATCH"
-    fi
-fi
-
-# 4) wiliwili 整仓
+# 7) wiliwili 整仓
 # -U OPENSSL_*：让 FindOpenSSL.cmake（tools/cmake）重新生效，避免 sysroot 绝对路径进入 DT_NEEDED
 cmake -S "$SOURCE" -B "$BUILD" \
     -U "OPENSSL_*" \

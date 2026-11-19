@@ -164,6 +164,19 @@ public:
     QualityDataSource(bilibili::VideoUrlResult result, BaseDropdown* view)
         : DataSourceDropdown(view), data(std::move(result)) {
         login = !ProgramConfig::instance().getCSRF().empty();
+        // Steam Link 硬解只到 1080P@60，过滤掉 4K/HDR/8K 候选项
+        std::vector<int> supportedQuality;
+        std::vector<std::string> supportedDescription;
+        const size_t count = data.accept_quality.size() < data.accept_description.size()
+                                 ? data.accept_quality.size()
+                                 : data.accept_description.size();
+        for (size_t i = 0; i < count; i++) {
+            if (data.accept_quality[i] > 116 && data.accept_quality[i] != 192) continue;
+            supportedQuality.push_back(data.accept_quality[i]);
+            supportedDescription.push_back(data.accept_description[i]);
+        }
+        data.accept_quality     = supportedQuality;
+        data.accept_description = supportedDescription;
     }
 
     RecyclingGridItem* cellForRow(RecyclingGrid* recycler, size_t index) override {
@@ -463,15 +476,31 @@ void BasePlayerActivity::updateVideoLink() {
 void BasePlayerActivity::setVideoQuality() {
     if (this->videoUrlResult.accept_description.empty()) return;
 
+    // getQualityIndex() 返回原始 accept_quality 序号；下拉列表已过滤 >116。
+    const int originalSelected = getQualityIndex();
+    int visibleSelected = 0;
+    for (size_t i = 0; i < this->videoUrlResult.accept_quality.size(); i++) {
+        if (this->videoUrlResult.accept_quality[i] > 116 && this->videoUrlResult.accept_quality[i] != 192) continue;
+        if ((int)i == originalSelected) break;
+        visibleSelected++;
+    }
+    size_t visibleCount = 0;
+    for (int q : this->videoUrlResult.accept_quality) {
+        if (q <= 116 || q == 192) visibleCount++;
+    }
+    if ((size_t)visibleSelected >= visibleCount) visibleSelected = 0;
+
     auto* dropdown = new BaseDropdown(
         "wiliwili/player/quality"_i18n,
         [this](int selected) {
-            int code                           = this->videoUrlResult.accept_quality[selected];
-#ifdef __PSV__
-            if (code > 64) {
-                code = 64;
+            // selected 是过滤后的下拉序号，重新映射到原始 qn
+            int code       = 116;
+            size_t visible = 0;
+            for (int q : this->videoUrlResult.accept_quality) {
+                if (q > 116 && q != 192) continue;
+                if (visible == (size_t)selected) { code = q; break; }
+                visible++;
             }
-#endif
             BasePlayerActivity::defaultQuality = code;
             ProgramConfig::instance().setSettingItem(SettingItem::VIDEO_QUALITY, code);
 
@@ -483,7 +512,7 @@ void BasePlayerActivity::setVideoQuality() {
 
             this->updateVideoLink();
         },
-        getQualityIndex());
+        visibleSelected);
     auto* recycler = dropdown->getRecyclingList();
     recycler->registerCell("Cell", []() { return new QualityCell(); });
     dropdown->setDataSource(new QualityDataSource(this->videoUrlResult, dropdown));
@@ -600,11 +629,13 @@ void BasePlayerActivity::onVideoPlayUrl(const bilibili::VideoUrlResult& result) 
         // 找到当前可用的清晰度
         for (const auto& i : result.dash.video) {
             int desiredQuality = result.quality;
-            // 若设置了过高的清晰度, 自动切换到合适的清晰度, 默认为 128 (即无限制)
-            if (i.height > i.width) {
-                desiredQuality = std::min(desiredQuality, portraitQualityMax);
-            } else {
-                desiredQuality = std::min(desiredQuality, landscapeQualityMax);
+            // 192 是旧 MP4 支线的 720P 内部编号，不属于 >116 的高档位
+            if (desiredQuality != 192) {
+                if (i.height > i.width) {
+                    desiredQuality = std::min(desiredQuality, portraitQualityMax);
+                } else {
+                    desiredQuality = std::min(desiredQuality, landscapeQualityMax);
+                }
             }
 
             if (desiredQuality >= i.id) {

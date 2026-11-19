@@ -146,11 +146,13 @@
                 <brls:Header
                         width="auto"
                         height="auto"
+                        id="setting/equalizer/header"
                         title="@i18n/wiliwili/player/setting/equalizer/header"
                         marginBottom="0px"/>
                 <brls:Box
                         width="100%"
                         height="auto"
+                        id="setting/equalizer/box"
                         axis="column"
                         marginBottom="30px">
                     <brls:SliderCell

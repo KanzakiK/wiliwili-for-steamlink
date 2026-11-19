@@ -213,7 +213,7 @@ public:
     static inline int DANMAKU_STYLE_LINE_HEIGHT = 120;
 
     /// [stroke, incline, shadow, pure]
-    static inline DanmakuFontStyle DANMAKU_STYLE_FONT = DanmakuFontStyle::DANMAKU_FONT_STROKE;
+    static inline DanmakuFontStyle DANMAKU_STYLE_FONT = DanmakuFontStyle::DANMAKU_FONT_PURE; // SteamLinkDanmakuFontDefault
 
     /// [0 - 100]
     static inline int DANMAKU_RENDER_QUALITY = 100;

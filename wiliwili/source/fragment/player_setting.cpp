@@ -32,6 +32,29 @@ PlayerSetting::PlayerSetting() {
     setupCommonSetting();
     setupSubtitle();
 
+    // Steam Link VPU 不走 mpv 图像调节，隐藏整个均衡器区域
+    equalizerHeader->setVisibility(brls::Visibility::GONE);
+    equalizerBox->setVisibility(brls::Visibility::GONE);
+    // borealis 的 Box::getDefaultFocus() 会递归遍历子节点，忽略父节点 visibility；
+    // 只隐藏容器仍会让焦点落到内部滑块，必须同步取消这些控件的焦点能力。
+    btnEqualizerReset->setFocusable(false);
+    btnEqualizerBrightness->setFocusable(false);
+    btnEqualizerContrast->setFocusable(false);
+    btnEqualizerSaturation->setFocusable(false);
+    btnEqualizerGamma->setFocusable(false);
+    btnEqualizerHue->setFocusable(false);
+    btnEqualizerBrightness->slider->setFocusable(false);
+    btnEqualizerContrast->slider->setFocusable(false);
+    btnEqualizerSaturation->slider->setFocusable(false);
+    btnEqualizerGamma->slider->setFocusable(false);
+    btnEqualizerHue->slider->setFocusable(false);
+    // Slider::getDefaultFocus() 返回私有的 pointer 子控件，继续禁用其子节点
+    for (auto* child : btnEqualizerBrightness->slider->getChildren()) child->setFocusable(false);
+    for (auto* child : btnEqualizerContrast->slider->getChildren()) child->setFocusable(false);
+    for (auto* child : btnEqualizerSaturation->slider->getChildren()) child->setFocusable(false);
+    for (auto* child : btnEqualizerGamma->slider->getChildren()) child->setFocusable(false);
+    for (auto* child : btnEqualizerHue->slider->getChildren()) child->setFocusable(false);
+
     this->registerAction("hints/cancel"_i18n, brls::BUTTON_B, [](...) {
         brls::Application::popActivity();
         return true;

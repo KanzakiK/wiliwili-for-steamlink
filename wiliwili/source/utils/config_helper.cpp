@@ -99,17 +99,16 @@ unsigned int sceLibcHeapSize             = 24 * 1024 * 1024;
 #else
 // 默认清晰度 (116 为 1080P@60)
 #define WILI_VIDEO_QUALITY_DEFAULT 116
-// 横屏视频最高清晰度 (127 为 8K, 128 即无限制)
-#define WILI_VIDEO_QUALITY_LANDSCAPE_MAX 128
-// 竖屏视频最高清晰度
-#define WILI_VIDEO_QUALITY_PORTRAIT_MAX 128
+// Steam Link 硬解上限：116 = 1080P@60，禁止 4K/8K
+#define WILI_VIDEO_QUALITY_LANDSCAPE_MAX 116
+#define WILI_VIDEO_QUALITY_PORTRAIT_MAX 116
 // 默认窗口大小 (不配置 ui 缩放时的窗口大小)
 #define WILI_WINDOW_WIDTH_DEFAULT 1280
 #define WILI_WINDOW_HEIGHT_DEFAULT 720
 // 默认 UI 缩放 (1 为 1280x720)
 #define WILI_UI_SCALE_DEFAULT 1
-// 默认音频质量 (2 为 高)
-#define WILI_AUDIO_QUALITY_DEFAULT 2
+// 默认音频质量 (0 为 High，仅 AAC 三档)
+#define WILI_AUDIO_QUALITY_DEFAULT 0
 // DNS 缓存时间
 #define WILI_DNS_CACHE_TIMEOUT 60000
 #endif
@@ -148,7 +147,7 @@ std::unordered_map<SettingItem, ProgramOption> ProgramConfig::SETTING_MAP = {
     {SettingItem::DLNA_NAME, {"dlna_name", {}, {}, 0}},
     {SettingItem::PLAYER_ASPECT, {"player_aspect", {"-1", "-2", "-3", "4:3", "16:9"}, {}, 0}},
     {SettingItem::HTTP_PROXY, {"http_proxy", {}, {}, 0}},
-    {SettingItem::DANMAKU_STYLE_FONT, {"danmaku_style_font", {"stroke", "incline", "shadow", "pure"}, {}, 0}},
+    {SettingItem::DANMAKU_STYLE_FONT, {"danmaku_style_font", {"stroke", "incline", "shadow", "pure"}, {}, 3}}, // SteamLinkDanmakuFontDefault
     {SettingItem::SHORTCUT_REFRESH, {"shortcut_refresh", {}, {}, 0}},
     {SettingItem::SHORTCUT_SEARCH, {"shortcut_search", {}, {}, 0}},
     {SettingItem::SHORTCUT_LAST, {"shortcut_last", {}, {}, 0}},
@@ -200,7 +199,8 @@ std::unordered_map<SettingItem, ProgramOption> ProgramConfig::SETTING_MAP = {
     {SettingItem::PLAYER_HWDEC_CUSTOM, {"player_hwdec_custom", {}, {}, 0}},
     {SettingItem::PLAYER_EXIT_FULLSCREEN_ON_END, {"player_exit_fullscreen_on_end", {}, {}, 1}},
     {SettingItem::PLAYER_WINDOW_FULLSCREEN_ON_APP_FULLSCREEN, {"player_window_fullscreen_on_app_fullscreen", {}, {}, 0}},
-    {SettingItem::PLAYER_AUTO_FULLSCREEN, {"player_auto_fullscreen", {}, {}, 0}},
+    {SettingItem::PLAYER_AUTO_FULLSCREEN, {"player_auto_fullscreen", {}, {}, 1}}, // SteamLinkDefaults
+    // SteamLinkDefaults: player_auto_play 上游默认已开启，Steam Link 依赖详情页直接起播
     {SettingItem::PLAYER_OSD_TV_MODE, {"player_osd_tv_mode", {}, {}, 0}},
     {SettingItem::OPENCC_ON, {"opencc", {}, {}, 1}},
     {SettingItem::DANMAKU_ON, {"danmaku", {}, {}, 1}},
@@ -209,7 +209,8 @@ std::unordered_map<SettingItem, ProgramOption> ProgramConfig::SETTING_MAP = {
     {SettingItem::DANMAKU_FILTER_SCROLL, {"danmaku_filter_scroll", {}, {}, 1}},
     {SettingItem::DANMAKU_FILTER_COLOR, {"danmaku_filter_color", {}, {}, 1}},
     {SettingItem::DANMAKU_FILTER_ADVANCED, {"danmaku_filter_advanced", {}, {}, 0}},
-    {SettingItem::DANMAKU_SMART_MASK, {"danmaku_smart_mask", {}, {}, 1}},
+    // SteamLinkDefaults: 关闭智能弹幕遮罩，降低单核 UI 负担
+    {SettingItem::DANMAKU_SMART_MASK, {"danmaku_smart_mask", {}, {}, 0}},
     {SettingItem::SEARCH_TV_MODE, {"search_tv_mode", {}, {}, 1}},
     {SettingItem::HTTP_PROXY_STATUS, {"http_proxy_status", {}, {}, 0}},
     {SettingItem::TLS_VERIFY,
@@ -219,7 +220,7 @@ std::unordered_map<SettingItem, ProgramOption> ProgramConfig::SETTING_MAP = {
 #if defined(__PSV__) || defined(__SWITCH__) || defined(PS4)
       0}},
 #else
-      1}},
+      0}}, // SteamLinkDefaults: 设备时间可能回到 1970，避免 CDN 证书校验失败
 #endif
 
     /// number
@@ -230,20 +231,20 @@ std::unordered_map<SettingItem, ProgramOption> ProgramConfig::SETTING_MAP = {
      {"player_inmemory_cache", {"0MB", "10MB", "20MB", "50MB", "100MB"}, {0, 10, 20, 50, 100}, 0}},
 #else
     {SettingItem::PLAYER_INMEMORY_CACHE,
-     {"player_inmemory_cache", {"0MB", "10MB", "20MB", "50MB", "100MB"}, {0, 10, 20, 50, 100}, 1}},
+     {"player_inmemory_cache", {"0MB", "10MB", "20MB", "50MB", "100MB"}, {0, 10, 20, 50, 100}, 0}}, // SteamLinkDefaults
 #endif
     {
         SettingItem::PLAYER_DEFAULT_SPEED,
         {"player_default_speed",
          {"4.0x", "3.0x", "2.0x", "1.75x", "1.5x", "1.25x", "1.0x", "0.75x", "0.5x", "0.25x"},
          {400, 300, 200, 175, 150, 125, 100, 75, 50, 25},
-         2},
+         6}, // SteamLinkDefaults: 1.0x，倍速入口隐藏后弹幕倍率保持正常
     },
     {SettingItem::PLAYER_VOLUME, {"player_volume", {}, {}, 0}},
-    {SettingItem::TEXTURE_CACHE_NUM, {"texture_cache_num", {}, {}, 0}},
+    {SettingItem::TEXTURE_CACHE_NUM, {"texture_cache_num", {}, {}, 100}}, // SteamLinkDefaults
     {SettingItem::VIDEO_QUALITY, {"video_quality", {}, {}, 116}},
-    {SettingItem::VIDEO_QUALITY_LANDSCAPE_MAX, {"video_quality_landscape_max", {}, {}, 128}},
-    {SettingItem::VIDEO_QUALITY_PORTRAIT_MAX, {"video_quality_portrait_max", {}, {}, 128}},
+    {SettingItem::VIDEO_QUALITY_LANDSCAPE_MAX, {"video_quality_landscape_max", {}, {}, 116}},
+    {SettingItem::VIDEO_QUALITY_PORTRAIT_MAX, {"video_quality_portrait_max", {}, {}, 116}},
     {SettingItem::IMAGE_REQUEST_THREADS,
      {"image_request_threads",
 #if defined(__SWITCH__) || defined(__PSV__)
@@ -253,15 +254,15 @@ std::unordered_map<SettingItem, ProgramOption> ProgramConfig::SETTING_MAP = {
 #else
       {"1", "2", "3", "4", "8", "12", "16"},
       {1, 2, 3, 4, 8, 12, 16},
-      3}},
+      0}}, // SteamLinkDefaults: 单核设备只用 1 个图片请求线程
 #endif
     {SettingItem::VIDEO_FORMAT, {"file_format", {"Dash (AVC/HEVC/AV1)", "FLV/MP4"}, {4048, 0}, 0}},
-    {SettingItem::VIDEO_CODEC, {"video_codec", {"AVC/H.264", "HEVC/H.265", "AV1"}, {7, 12, 13}, 0}},
+    {SettingItem::VIDEO_CODEC, {"video_codec", {"AVC/H.264"}, {7}, 0}},
     {SettingItem::AUDIO_QUALITY,
-     {"audio_quality", {"Dolby Atmos", "Hi-Res", "High", "Medium", "Low"}, {30250, 30251, 30280, 30232, 30216}, WILI_AUDIO_QUALITY_DEFAULT}},
+     {"audio_quality", {"High", "Medium", "Low"}, {30280, 30232, 30216}, WILI_AUDIO_QUALITY_DEFAULT}},
     {SettingItem::DANMAKU_FILTER_LEVEL,
      {"danmaku_filter_level", {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"}, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, 0}},
-    {SettingItem::DANMAKU_STYLE_AREA, {"danmaku_style_area", {"1/4", "1/2", "3/4", "1"}, {25, 50, 75, 100}, 3}},
+    {SettingItem::DANMAKU_STYLE_AREA, {"danmaku_style_area", {"1/4", "1/2", "3/4", "1"}, {25, 50, 75, 100}, 0}}, // SteamLinkDanmakuDefault
     {SettingItem::DANMAKU_STYLE_ALPHA,
      {"danmaku_style_alpha",
       {"10%", "20%", "30%", "40%", "50%", "60%", "70%", "80%", "90%", "100%"},
@@ -556,12 +557,19 @@ void ProgramConfig::load() {
     // 初始化视频清晰度最高限制
     VideoDetail::landscapeQualityMax = getSettingItem(SettingItem::VIDEO_QUALITY_LANDSCAPE_MAX,
                                                       WILI_VIDEO_QUALITY_LANDSCAPE_MAX);
+    if (VideoDetail::landscapeQualityMax > WILI_VIDEO_QUALITY_LANDSCAPE_MAX)
+        VideoDetail::landscapeQualityMax = WILI_VIDEO_QUALITY_LANDSCAPE_MAX;
     VideoDetail::portraitQualityMax = getSettingItem(SettingItem::VIDEO_QUALITY_PORTRAIT_MAX,
                                                      WILI_VIDEO_QUALITY_PORTRAIT_MAX);
+    if (VideoDetail::portraitQualityMax > WILI_VIDEO_QUALITY_PORTRAIT_MAX)
+        VideoDetail::portraitQualityMax = WILI_VIDEO_QUALITY_PORTRAIT_MAX;
 
     // 初始化视频清晰度
     VideoDetail::defaultQuality = getSettingItem(SettingItem::VIDEO_QUALITY,
                                                  WILI_VIDEO_QUALITY_DEFAULT);
+    // 192 是旧 MP4 支线的 720P 内部编号，不属于超过 1080P60 的高档位
+    if (VideoDetail::defaultQuality > WILI_VIDEO_QUALITY_LANDSCAPE_MAX && VideoDetail::defaultQuality != 192)
+        VideoDetail::defaultQuality = WILI_VIDEO_QUALITY_LANDSCAPE_MAX;
     if (!hasLoginInfo()) {
         // 用户未登录时跟随官方将默认清晰度设置到 360P
         VideoDetail::defaultQuality = 16;
@@ -571,7 +579,7 @@ void ProgramConfig::load() {
     MPVCore::AUTO_PLAY = getBoolOption(SettingItem::PLAYER_AUTO_PLAY);
 
     // 初始化默认的倍速设定
-    MPVCore::VIDEO_SPEED = getIntOption(SettingItem::PLAYER_DEFAULT_SPEED);
+    MPVCore::VIDEO_SPEED = 100; // SteamLinkDefaults: 倍速入口隐藏，固定 1.0x 避免弹幕倍率错误
 
     // 初始化视频比例
     MPVCore::VIDEO_ASPECT = getSettingItem(SettingItem::PLAYER_ASPECT, std::string{"-1"});
@@ -607,8 +615,13 @@ void ProgramConfig::load() {
 
     // 初始化视频格式
     BILI::FNVAL         = std::to_string(getIntOption(SettingItem::VIDEO_FORMAT));
-    BILI::VIDEO_CODEC   = getIntOption(SettingItem::VIDEO_CODEC);
-    BILI::AUDIO_QUALITY = getIntOption(SettingItem::AUDIO_QUALITY);
+    BILI::VIDEO_CODEC   = 7; // Steam Link VPU 只支持 H.264
+    int audioQuality = getIntOption(SettingItem::AUDIO_QUALITY);
+    if (audioQuality != 30280 && audioQuality != 30232 && audioQuality != 30216) {
+        // 旧配置里的 Dolby Atmos / Hi-Res 在 Steam Link 上不允许
+        audioQuality = 30280;
+    }
+    BILI::AUDIO_QUALITY = audioQuality;
 
     // 初始化搜索页样式
     TVSearchActivity::TV_MODE = getBoolOption(SettingItem::SEARCH_TV_MODE);
@@ -783,7 +796,7 @@ void ProgramConfig::load() {
 #if defined(__PSV__) || defined(PS4)
         brls::TextureCache::instance().cache.setCapacity(1);
 #else
-        brls::TextureCache::instance().cache.setCapacity(getSettingItem(SettingItem::TEXTURE_CACHE_NUM, 200));
+        brls::TextureCache::instance().cache.setCapacity(getSettingItem(SettingItem::TEXTURE_CACHE_NUM, 100)); // SteamLinkDefaults
 #endif
 
         // 初始化播放器音量

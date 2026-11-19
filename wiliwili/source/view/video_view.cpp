@@ -60,6 +60,8 @@ static int getSeekRange(int current) {
 VideoView::VideoView() {
     mpvCore = &MPVCore::instance();
     this->inflateFromXMLRes("xml/views/video_view.xml");
+    // Steam Link VPU 不支持调节播放倍速，隐藏 OSD 倍速入口并清除其焦点
+    hideVideoSpeedButton(); // SteamLinkHideSpeed
     this->setHideHighlightBackground(true);
     this->setHideClickAnimation(true);
 
@@ -618,6 +620,8 @@ void VideoView::requestSeeking(int seek, int delay) {
 
 VideoView::~VideoView() {
     brls::Logger::debug("trying delete VideoView...");
+    // 先置死令牌，再摘订阅：即使有订阅残留，回调也不会再碰已释放的对象
+    *this->aliveToken = false;
     this->unRegisterMpvEvent();
     APP_E->unsubscribe(customEventSubscribeID);
     brls::Logger::debug("Delete VideoView done");
@@ -642,8 +646,11 @@ void VideoView::draw(NVGcontext* vg, float x, float y, float width, float height
     // draw bottom bar
     if (BOTTOM_BAR && showBottomLineSetting) {
         bottomBarColor.a = alpha;
-        float progress   = mpvCore->playback_time / getRealDuration();
-        progress         = progress > 1.0f ? 1.0f : progress;
+        float duration   = getRealDuration();
+        float progress   = duration > 0.0f ? mpvCore->playback_time / duration : 0.0f;
+        // SteamLinkBottomBarGuard: 详情页加载时 duration=0 会产生 NaN 宽度，NanoVG 会填成整屏粉色
+        if (!std::isfinite(progress)) progress = 0.0f;
+        progress = std::max(0.0f, std::min(progress, 1.0f));
         nvgFillColor(vg, bottomBarColor);
         nvgBeginPath(vg);
         nvgRect(vg, x, y + height - 2, width * progress, 2);
@@ -1542,9 +1549,16 @@ void VideoView::buttonProcessing() {
 
 void VideoView::registerMpvEvent() {
     if (registerMPVEvent) {
+        // 必须直接返回：若继续 subscribe，新的迭代器会覆盖 eventSubscribeID，
+        // 旧订阅将永久残留在 MPVCore 的事件链表中（unRegisterMpvEvent 只能摘掉最后一个）。
+        // VideoView 析构后残留的 lambda 仍会被事件 fire，其捕获的 this 已悬空 -> UAF 崩溃。
         brls::Logger::error("VideoView already register MPV Event");
+        return;
     }
-    eventSubscribeID = mpvCore->getEvent()->subscribe([this](MpvEventEnum event) {
+    // 按值捕获生命周期令牌，回调执行前检查对象是否仍然存活
+    auto alive = this->aliveToken;
+    eventSubscribeID = mpvCore->getEvent()->subscribe([this, alive](MpvEventEnum event) {
+        if (!*alive) return;
         // brls::Logger::info("mpv event => : {}", event);
         switch (event) {
             case MpvEventEnum::MPV_IDLE:

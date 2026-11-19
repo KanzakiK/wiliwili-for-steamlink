@@ -557,12 +557,15 @@ void SettingActivity::onContentAvailable() {
                             bilibili::BilibiliClient::VIDEO_CODEC = codecOption.rawOptionList[data];
                             return true;
                         });
+    // Steam Link VPU 只支持 H.264，编码选项不向用户暴露
+    selectorCodec->setVisibility(brls::Visibility::GONE);
+    selectorCodec->setFocusable(false);
 
     /// AudioBandwidth
     auto bandwidthOption = conf.getOptionData(SettingItem::AUDIO_QUALITY);
     selectorQuality->init(
         "wiliwili/setting/app/playback/audio_quality"_i18n,
-        {"wiliwili/setting/app/playback/dolby"_i18n, "wiliwili/setting/app/playback/hi_res"_i18n, "wiliwili/home/common/high"_i18n, "wiliwili/home/common/medium"_i18n, "wiliwili/home/common/low"_i18n},
+        {"wiliwili/home/common/high"_i18n, "wiliwili/home/common/medium"_i18n, "wiliwili/home/common/low"_i18n},
         conf.getIntOptionIndex(SettingItem::AUDIO_QUALITY), [bandwidthOption](int data) {
             ProgramConfig::instance().setSettingItem(SettingItem::AUDIO_QUALITY, bandwidthOption.rawOptionList[data]);
             bilibili::BilibiliClient::AUDIO_QUALITY = bandwidthOption.rawOptionList[data];
@@ -581,7 +584,7 @@ void SettingActivity::onContentAvailable() {
                                  selectorCodec->setVisibility(brls::Visibility::GONE);
                                  selectorQuality->setVisibility(brls::Visibility::GONE);
                              } else {
-                                 selectorCodec->setVisibility(brls::Visibility::VISIBLE);
+                                 selectorCodec->setVisibility(brls::Visibility::GONE);
                                  selectorQuality->setVisibility(brls::Visibility::VISIBLE);
                              }
                              return true;
@@ -614,7 +617,7 @@ void SettingActivity::onContentAvailable() {
 #else
     selectorTexture->init("wiliwili/setting/app/image/texture"_i18n,
                           {"100", "200 (" + "hints/preset"_i18n + ")", "300", "400", "500"},
-                          conf.getSettingItem(SettingItem::TEXTURE_CACHE_NUM, 200) / 100 - 1, [](int data) {
+                          conf.getSettingItem(SettingItem::TEXTURE_CACHE_NUM, 100) / 100 - 1, [](int data) { // SteamLinkDefaults
                               int num = 100 * data + 100;
                               ProgramConfig::instance().setSettingItem(SettingItem::TEXTURE_CACHE_NUM, num);
                               brls::TextureCache::instance().cache.setCapacity(num);
