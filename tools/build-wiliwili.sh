@@ -94,6 +94,15 @@ if [ -f "$LOG_REDACTION_PATCH" ] && [ -d "$SOURCE/.git" ]; then
     fi
 fi
 
+# D27：UI 侧权威 session。只在 SL_DEBUG_RUN_ID 存在时生成，正式启动路径不写字段。
+DEBUG_SESSION_PATCH="$PROJECT_DIR/tools/patches/wiliwili-debug-session.patch"
+if [ -f "$DEBUG_SESSION_PATCH" ] && [ -d "$SOURCE/.git" ]; then
+    if ! grep -q 'setDebugSession' "$SOURCE/wiliwili/include/view/video_view.hpp" 2>/dev/null; then
+        echo "apply wiliwili debug session patch"
+        git -C "$SOURCE" apply --recount "$DEBUG_SESSION_PATCH"
+    fi
+fi
+
 # D16：按 Steam Link 实际显示尺寸收敛图片请求，降低 JPEG 解码和 GPU 纹理占用。
 # 只改请求后缀常量，不改 wiliwili 布局/样式/Activity 行为。
 IMAGE_SIZE_PATCH="$PROJECT_DIR/tools/patches/wiliwili-image-size.patch"

@@ -1,0 +1,101 @@
+diff --git a/wiliwili/include/view/video_view.hpp b/wiliwili/include/view/video_view.hpp
+--- a/wiliwili/include/view/video_view.hpp
++++ b/wiliwili/include/view/video_view.hpp
+@@ -171,6 +171,9 @@
+     /// 番剧自定义菜单信息
+     void setBangumiCustomSetting(const std::string& title, uint64_t seasonId);
+ 
++    // D27: debug session；只在 SL_DEBUG_RUN_ID 存在时生效
++    void setDebugSession(const std::string& content, const std::string& id,
++                         const std::string& detail = "");
++
+     void setTitle(const std::string& title);
+@@ -279,6 +282,11 @@
+ private:
+     bool allowFullscreen  = true;
+     bool registerMPVEvent = false;
++    inline static std::string debugRun;
++    inline static std::string debugSession;
++    inline static std::string debugContent;
++    inline static std::string debugId;
++    inline static std::string debugDetail;
+     /// 生命周期令牌，析构时置为 false。
+diff --git a/wiliwili/source/view/video_view.cpp b/wiliwili/source/view/video_view.cpp
+--- a/wiliwili/source/view/video_view.cpp
++++ b/wiliwili/source/view/video_view.cpp
+@@ -5,6 +5,8 @@
+ 
+ #include <limits>
+ #include <cmath>
++#include <atomic>
++#include <cstdlib>
+ 
+ #include <borealis/views/label.hpp>
+@@ -803,6 +805,28 @@
+ void VideoView::invalidate() { View::invalidate(); }
+ 
+ void VideoView::onLayout() { brls::View::onLayout(); }
+ 
++// D27: 由 UI 侧生成权威 session，只在 SL_DEBUG_RUN_ID 存在时生效。
++void VideoView::setDebugSession(const std::string& content, const std::string& id,
++                                const std::string& detail) {
++    const char* run = getenv("SL_DEBUG_RUN_ID");
++    if (!run || !*run) return;
++    static std::atomic<uint64_t> seq{0};
++    debugRun = run;
++    debugSession = fmt::format("{}-{}", run, seq.fetch_add(1) + 1);
++    debugContent = content;
++    debugId = id;
++    debugDetail = detail;
++    brls::Logger::info(
++        "[UI][run={}][session={}] content start content={} id={} detail={}",
++        debugRun, debugSession, debugContent, debugId, debugDetail);
++}
++
+ std::string VideoView::genExtraUrlParam(int start, int end, const std::string& audio) {
+     std::vector<std::string> audios;
+     if (!audio.empty()) {
+@@ -824,6 +848,10 @@
+     for (auto& audio : audios) extra += fmt::format(",audio-file=\"{}\"", audio);
++    if (!debugRun.empty()) {
++        extra += fmt::format(",run={},session={},content={},id={}",
++                             debugRun, debugSession, debugContent, debugId);
++    }
+     return extra;
+ }
+diff --git a/wiliwili/source/activity/player_base_activity.cpp b/wiliwili/source/activity/player_base_activity.cpp
+--- a/wiliwili/source/activity/player_base_activity.cpp
++++ b/wiliwili/source/activity/player_base_activity.cpp
+@@ -622,6 +622,16 @@
+         }
+     }
+ 
++    // D27: 在真正产生 loadfile 前，由 UI 侧设置权威内容标识。
++    {
++        std::string content = "video";
++        std::string id = videoDetailResult.bvid.empty() ? "unknown" : videoDetailResult.bvid;
++        std::string detail = fmt::format("cid={} aid={} qn={}", videoDetailPage.cid,
++                                         videoDetailResult.aid, result.quality);
++        if (seasonInfo.season_id > 0) {
++            content = "season";
++            id = std::to_string(seasonInfo.season_id);
++            detail = fmt::format("season_id={} cid={} qn={}", seasonInfo.season_id,
++                                 videoDetailPage.cid, result.quality);
++        }
++        this->video->setDebugSession(content, id, detail);
++    }
++
+     if (!result.dash.video.empty()) {
+         // dash
+diff --git a/wiliwili/source/activity/live_player_activity.cpp b/wiliwili/source/activity/live_player_activity.cpp
+--- a/wiliwili/source/activity/live_player_activity.cpp
++++ b/wiliwili/source/activity/live_player_activity.cpp
+@@ -375,6 +375,8 @@
+     for (const auto& i : liveUrl.url_info) {
+         auto url = i.host + liveUrl.base_url + i.extra;
+ 
++        // D27: 直播权威标识是 room id，不使用 BV/oid 反推。
++        this->video->setDebugSession("live", std::to_string(liveData.roomid), "");
+         // 设置视频链接
+         brls::Logger::debug("Live stream url: {}", url);
+         this->video->setUrl(url);
