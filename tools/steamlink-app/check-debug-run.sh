@@ -6,6 +6,7 @@
 #
 # 检查：
 #   - manifest / prestart / 统一日志 / dmesg before-after / launch_cmdline 齐全
+#   - CMD start/ok 对应的 dmesg 边界快照齐全
 #   - boot 行含同一 run id
 #   - 场景有 CMD status=start 与 status=ok
 #   - 播放器场景的 session 在 CMD、UI content start、daemon meta 中一致
@@ -51,6 +52,8 @@ fi
 if [ -z "$SCENE" ] || [ "$SCENE" = "none" ]; then
     fail "manifest 缺少有效 scene"
 fi
+check_file "dmesg.$SCENE.start.txt"
+check_file "dmesg.$SCENE.ok.txt"
 
 check_pattern wiliwili.log "[boot] run=$RUN_ID" "boot run id"
 check_pattern wiliwili.log "[CMD][run=$RUN_ID][session=" "CMD run/session 前缀"

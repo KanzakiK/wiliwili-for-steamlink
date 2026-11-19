@@ -125,4 +125,21 @@ fi
 
 echo "run=$RUN_ID"
 echo "artifacts=$RUN_DIR"
-sleep "$RUN_SECONDS"
+
+start_snapshot=0
+ok_snapshot=0
+deadline=$(( $(date +%s) + RUN_SECONDS ))
+cmd_prefix="[CMD][run=$RUN_ID]"
+while [ "$(date +%s)" -lt "$deadline" ]; do
+    if [ "$start_snapshot" -eq 0 ] && \
+       $SSH "grep -F '$cmd_prefix' /tmp/wiliwili.log 2>/dev/null | grep -q 'status=start'" 2>/dev/null; then
+        $SSH dmesg > "$RUN_DIR/dmesg.$SCENE.start.txt" 2>/dev/null || true
+        start_snapshot=1
+    fi
+    if [ "$ok_snapshot" -eq 0 ] && \
+       $SSH "grep -F '$cmd_prefix' /tmp/wiliwili.log 2>/dev/null | grep -q 'status=ok'" 2>/dev/null; then
+        $SSH dmesg > "$RUN_DIR/dmesg.$SCENE.ok.txt" 2>/dev/null || true
+        ok_snapshot=1
+    fi
+    sleep 1
+done
