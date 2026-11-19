@@ -5,12 +5,7 @@
 #   - SOURCE 默认就是本仓库根目录，正式包不包含 dev hook patch。
 #   - 11 个 wiliwili 正式修改已内源化，构建脚本只检查标记，不再应用 patch。
 #   - borealis 使用 KanzakiK/borealis 的 steamlink-port 分支，修改已在该 fork 内源化；
-#     构建只检查标记，不再应用 patch。
-#
-# Dev 构建：SL_DEV_BUILD=1 sh tools/build-wiliwili.sh
-#   额外严格应用 6 个 dev patch（--open-bv、P0 seek ×2、SL_MEDIA_TAG、
-#   debug session、debug controller）。这些 patch 会修改 SOURCE 工作树，
-#   建议在 SOURCE_DIR 指向的临时 worktree 中使用。
+#   - D27 debug session/controller 已内源化，由 debug.sh 环境变量按需启用。
 #
 # 产物：~/build-wiliwili/wiliwili（资源在 ~/build-wiliwili/resources）
 set -e
@@ -23,7 +18,6 @@ export MARVELL_SDK_PATH=${MARVELL_SDK_PATH:-$HOME/steamlink-sdk}
 export MARVELL_ROOTFS=${MARVELL_ROOTFS:-$HOME/steamlink-sdk/rootfs}
 
 PROJECT_DIR=${PROJECT_DIR:-/mnt/d/bilibili-steamlink}
-PATCH_DIR=$PROJECT_DIR/tools/patches
 STUB=$HOME/mpv-stub
 STUB_SRC=$PROJECT_DIR/tools/mpv-stub/mpv_stub.c
 SOURCE=${SOURCE_DIR:-$PROJECT_DIR}
@@ -41,21 +35,6 @@ require_marker() {
     [ -f "$file" ] || die "$label: 文件不存在 $file"
     grep -q "$marker" "$file" || die "$label: 缺少内源化标记 '$marker' ($file)"
     echo "ok: $label"
-}
-
-apply_strict() {
-    patch=$1
-    dir=$2
-    label=$3
-    [ -f "$patch" ] || die "$label: patch 不存在 $patch"
-    [ -d "$dir" ] || die "$label: 源码目录不存在 $dir"
-    if git -C "$dir" apply --reverse --check --recount "$patch" >/dev/null 2>&1; then
-        echo "already applied: $label"
-        return
-    fi
-    git -C "$dir" apply --check --recount "$patch" || die "$label: patch 失配 $patch"
-    git -C "$dir" apply --recount "$patch" || die "$label: patch 应用失败 $patch"
-    echo "applied: $label"
 }
 
 # 1) mpv 头文件（v0.37.0）
@@ -110,24 +89,7 @@ require_marker "$SOURCE/library/borealis/library/lib/platforms/sdl/sdl_video.cpp
 require_marker "$SOURCE/library/borealis/library/lib/extern/nanovg/nanovg.c" \
     'SteamLinkAtlasCap' 'borealis nanovg atlas cap'
 
-# 6) dev hook：默认不应用，避免正式包携带测试入口。
-if [ "${SL_DEV_BUILD:-0}" = "1" ]; then
-    if [ "$SOURCE" = "$PROJECT_DIR" ]; then
-        echo "WARNING: SL_DEV_BUILD=1 会修改仓库内源码，建议使用 SOURCE_DIR=<worktree>" >&2
-    fi
-    for p in wiliwili-open-bv-test.patch \
-             wiliwili-p0-seek-test.patch \
-             wiliwili-p0-seek-test-absolute.patch \
-             wiliwili-media-tag.patch \
-             wiliwili-debug-session.patch \
-             wiliwili-debug-controller.patch; do
-        apply_strict "$PATCH_DIR/$p" "$SOURCE" "$p"
-    done
-else
-    echo "dev hooks disabled (set SL_DEV_BUILD=1 to enable)"
-fi
-
-# 7) wiliwili 整仓
+# 6) wiliwili 整仓
 # -U OPENSSL_*：让 FindOpenSSL.cmake（tools/cmake）重新生效，避免 sysroot 绝对路径进入 DT_NEEDED
 cmake -S "$SOURCE" -B "$BUILD" \
     -U "OPENSSL_*" \

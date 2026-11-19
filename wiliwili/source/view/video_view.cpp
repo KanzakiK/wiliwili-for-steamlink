@@ -4,6 +4,9 @@
 
 #include <limits>
 #include <cmath>
+#include <atomic>
+#include <cstdio>
+#include <cstdlib>
 
 #include <borealis/views/label.hpp>
 #include <borealis/views/progress_spinner.hpp>
@@ -803,6 +806,27 @@ void VideoView::invalidate() { View::invalidate(); }
 
 void VideoView::onLayout() { brls::View::onLayout(); }
 
+// D27: 由 UI 侧生成权威 session，只在 SL_DEBUG_RUN_ID 存在时生效。
+void VideoView::setDebugSession(const std::string& content, const std::string& id,
+                                const std::string& detail) {
+    const char* run = getenv("SL_DEBUG_RUN_ID");
+    if (!run || !*run) return;
+    static std::atomic<uint64_t> seq{0};
+    debugRun = run;
+    debugSession = fmt::format("{}-{}", run, seq.fetch_add(1) + 1);
+    debugContent = content;
+    debugId = id;
+    debugDetail = detail;
+    fprintf(stderr,
+            "[UI][run=%s][session=%s] content start content=%s id=%s detail=%s\n",
+            debugRun.c_str(), debugSession.c_str(), debugContent.c_str(),
+            debugId.c_str(), debugDetail.c_str());
+}
+
+std::string VideoView::getDebugRun() { return debugRun; }
+
+std::string VideoView::getDebugSession() { return debugSession; }
+
 std::string VideoView::genExtraUrlParam(int start, int end, const std::string& audio) {
     std::vector<std::string> audios;
     if (!audio.empty()) {
@@ -829,6 +853,10 @@ std::string VideoView::genExtraUrlParam(int start, int end, const std::vector<st
         extra += fmt::format(",end={}", end);
     }
     for (auto& audio : audios) extra += fmt::format(",audio-file=\"{}\"", audio);
+    if (!debugRun.empty()) {
+        extra += fmt::format(",run={},session={},content={},id={}",
+                             debugRun, debugSession, debugContent, debugId);
+    }
     return extra;
 }
 

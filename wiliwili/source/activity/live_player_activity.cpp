@@ -374,6 +374,8 @@ void LiveActivity::onLiveData(const bilibili::LiveRoomPlayInfo &result)
     for (const auto& i : liveUrl.url_info) {
         auto url = i.host + liveUrl.base_url + i.extra;
 
+        // D27: 直播权威标识是 room id，不使用 BV/oid 反推。
+        this->video->setDebugSession("live", std::to_string(liveData.roomid), "");
         // 设置视频链接
         brls::Logger::debug("Live stream url: {}", url);
         this->video->setUrl(url);

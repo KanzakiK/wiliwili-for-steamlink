@@ -622,6 +622,21 @@ void BasePlayerActivity::onVideoPlayUrl(const bilibili::VideoUrlResult& result) 
         }
     }
 
+    // D27: 在真正产生 loadfile 前，由 UI 侧设置权威内容标识。
+    {
+        std::string content = "video";
+        std::string id = videoDetailResult.bvid.empty() ? "unknown" : videoDetailResult.bvid;
+        std::string detail = fmt::format("cid={} aid={} qn={}", videoDetailPage.cid,
+                                         videoDetailResult.aid, result.quality);
+        if (seasonInfo.season_id > 0) {
+            content = "season";
+            id = std::to_string(seasonInfo.season_id);
+            detail = fmt::format("season_id={} cid={} qn={}", seasonInfo.season_id,
+                                 videoDetailPage.cid, result.quality);
+        }
+        this->video->setDebugSession(content, id, detail);
+    }
+
     if (!result.dash.video.empty()) {
         // dash
         brls::Logger::debug("Video type: dash");

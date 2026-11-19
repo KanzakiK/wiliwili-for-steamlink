@@ -1,7 +1,0 @@
-diff --git a/wiliwili/source/main.cpp b/wiliwili/source/main.cpp
---- a/wiliwili/source/main.cpp
-+++ b/wiliwili/source/main.cpp
-@@ -71,2 +71,3 @@
-         if (!openBV.empty()) Intent::openBV(openBV);
-+        if (!openBV.empty()) setenv("SL_MEDIA_TAG", openBV.c_str(), 1);
-         const char* pauseAfterArg = std::getenv("SL_TEST_PAUSE_AFTER_SEC");

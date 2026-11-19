@@ -14,10 +14,88 @@
 #include "utils/config_helper.hpp"
 #include "utils/activity_helper.hpp"
 #include "view/mpv_core.hpp"
+#include "view/video_view.hpp"
 
 #ifdef IOS
 #include <SDL2/SDL_main.h>
 #endif
+
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <functional>
+#include <string>
+
+namespace {
+
+std::string d27Arg(const std::string& args, const char* key) {
+    size_t pos = 0;
+    while (pos <= args.size()) {
+        size_t end = args.find(';', pos);
+        std::string item = args.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+        size_t eq = item.find('=');
+        if (eq != std::string::npos && item.substr(0, eq) == key)
+            return item.substr(eq + 1);
+        if (end == std::string::npos) break;
+        pos = end + 1;
+    }
+    return "";
+}
+
+void d27Log(const char* stage, const std::string& scene, const std::string& detail) {
+    const char* run = getenv("SL_DEBUG_RUN_ID");
+    std::string session = VideoView::getDebugSession();
+    fprintf(stderr, "[%s][run=%s][session=%s] scene=%s %s\n", stage,
+            run ? run : "-", session.empty() ? "-" : session.c_str(),
+            scene.c_str(), detail.c_str());
+}
+
+void d27ExpectPlaying(const std::string& scene, int attempts,
+                      const std::function<void()>& done) {
+    if (MPVCore::instance().isPlaying()) {
+        brls::delay(500, done);
+        return;
+    }
+    if (attempts <= 0) {
+        d27Log("CMD", scene, "status=timeout waiting=playing");
+        return;
+    }
+    brls::delay(200, [scene, attempts, done]() {
+        d27ExpectPlaying(scene, attempts - 1, done);
+    });
+}
+
+void d27ExpectPaused(const std::string& scene, int attempts,
+                     const std::function<void()>& done) {
+    if (MPVCore::instance().isPaused()) {
+        done();
+        return;
+    }
+    if (attempts <= 0) {
+        d27Log("CMD", scene, "status=timeout waiting=paused");
+        return;
+    }
+    brls::delay(200, [scene, attempts, done]() {
+        d27ExpectPaused(scene, attempts - 1, done);
+    });
+}
+
+void d27ExpectPosition(const std::string& scene, double target, int attempts) {
+    if (fabs(MPVCore::instance().playback_time - target) <= 2.0) {
+        d27Log("CMD", scene, "status=ok");
+        return;
+    }
+    if (attempts <= 0) {
+        d27Log("CMD", scene, "status=timeout waiting=position");
+        return;
+    }
+    brls::delay(200, [scene, target, attempts]() {
+        d27ExpectPosition(scene, target, attempts - 1);
+    });
+}
+
+} // namespace
 
 int main(int argc, char* argv[]) {
     for (int i = 1; i < argc; i++) {
@@ -57,6 +135,66 @@ int main(int argc, char* argv[]) {
 
     if (brls::Application::getPlatform()->isApplicationMode()) {
         Intent::openMain();
+        const char* debugRun = getenv("SL_DEBUG_RUN_ID");
+        const char* debugContent = getenv("SL_DEBUG_CONTENT");
+        const char* debugScene = getenv("SL_DEBUG_SCENE");
+        if (debugRun && *debugRun && debugContent && *debugContent &&
+            debugScene && *debugScene) {
+            std::string content = debugContent;
+            std::string scene = debugScene;
+            std::string args = getenv("SL_DEBUG_ARGS") ? getenv("SL_DEBUG_ARGS") : "";
+            int timeout = atoi(d27Arg(args, "timeout").c_str());
+            if (timeout <= 0) timeout = 30;
+            if (content.rfind("video:", 0) == 0)
+                Intent::openBV(content.substr(6));
+            else if (content.rfind("season:ep:", 0) == 0)
+                Intent::openSeasonByEpId(strtoull(content.substr(10).c_str(), nullptr, 10));
+            else if (content.rfind("season:", 0) == 0)
+                Intent::openSeasonBySeasonId(strtoull(content.substr(7).c_str(), nullptr, 10));
+            else if (content.rfind("live:", 0) == 0)
+                Intent::openLive(atoi(content.substr(5).c_str()));
+            else if (content.rfind("dynamic:", 0) == 0)
+                Intent::openActivity(content.substr(8));
+            else if (content == "page:setting")
+                Intent::openSetting();
+            else if (content.rfind("page:search:", 0) == 0)
+                Intent::openSearch(content.substr(12));
+            else if (content.rfind("page:collection:", 0) == 0)
+                Intent::openCollection(content.substr(16));
+            d27Log("CMD", scene, "status=start content=" + content);
+
+            if (scene == "page_nav" || scene == "none") {
+                brls::delay(500, [scene]() { d27Log("CMD", scene, "status=ok"); });
+            } else if (scene == "play") {
+                d27ExpectPlaying(scene, timeout * 5,
+                                 [scene]() { d27Log("CMD", scene, "status=ok"); });
+            } else if (scene == "seek_forward" || scene == "seek_backward") {
+                double value = atof(d27Arg(args, "target").c_str());
+                if (value <= 0) value = atof(d27Arg(args, "delta").c_str());
+                d27ExpectPlaying(scene, timeout * 5, [scene, value, timeout]() {
+                    if (scene == "seek_forward")
+                        MPVCore::instance().seek((int64_t)value);
+                    else
+                        MPVCore::instance().seekRelative(-(int64_t)value);
+                    d27ExpectPosition(scene, value, timeout * 5);
+                });
+            } else if (scene == "pause_resume") {
+                int after = atoi(d27Arg(args, "after").c_str());
+                if (after <= 0) after = 2;
+                d27ExpectPlaying(scene, timeout * 5, [scene, after]() {
+                    MPVCore::instance().pause();
+                    d27ExpectPaused(scene, 150, [scene, after]() {
+                        brls::delay(after * 1000, [scene]() {
+                            MPVCore::instance().resume();
+                            d27ExpectPlaying(scene, 150,
+                                             [scene]() { d27Log("CMD", scene, "status=ok"); });
+                        });
+                    });
+                });
+            } else {
+                d27Log("CMD", scene, "status=error unknown_scene");
+            }
+        }
         // Uncomment these lines to debug activities
         //        Intent::openBV("BV1Da411Y7U4");  // 弹幕防遮挡 (横屏)
         //        Intent::openBV("BV1iN4y1m7J3");  // 弹幕防遮挡 (竖屏)

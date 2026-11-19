@@ -171,6 +171,12 @@ public:
     /// 番剧自定义菜单信息
     void setBangumiCustomSetting(const std::string& title, uint64_t seasonId);
 
+    // D27: debug session；只在 SL_DEBUG_RUN_ID 存在时生效
+    void setDebugSession(const std::string& content, const std::string& id,
+                         const std::string& detail = "");
+    static std::string getDebugRun();
+    static std::string getDebugSession();
+
     void setTitle(const std::string& title);
 
     std::string getTitle();
@@ -279,6 +285,11 @@ public:
 private:
     bool allowFullscreen  = true;
     bool registerMPVEvent = false;
+    inline static std::string debugRun;
+    inline static std::string debugSession;
+    inline static std::string debugContent;
+    inline static std::string debugId;
+    inline static std::string debugDetail;
     /// 生命周期令牌，析构时置为 false。
     /// 订阅以 std::list 迭代器管理，一旦重复订阅就会覆盖 eventSubscribeID，
     /// 旧订阅将永久残留在事件链表中并持有悬空的 this。回调开头检查此令牌，
