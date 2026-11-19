@@ -174,7 +174,7 @@ private:
 
 class PlayerSeasonActivity : public BasePlayerActivity {
 public:
-    PlayerSeasonActivity(const unsigned int id, PGC_ID_TYPE type = PGC_ID_TYPE::SEASON_ID, int progress = -1);
+    PlayerSeasonActivity(uint64_t id, PGC_ID_TYPE type = PGC_ID_TYPE::SEASON_ID, int progress = -1);
 
     ~PlayerSeasonActivity() override;
 
@@ -210,7 +210,7 @@ public:
     uint64_t getAid() override;
 
 private:
-    unsigned int pgc_id;
+    uint64_t pgc_id;
     PGC_ID_TYPE pgcIdType;
 
     BRLS_BIND(brls::Box, boxFavorites, "video/favorites/box");

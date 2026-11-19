@@ -25,7 +25,7 @@
 
 /// PlayerSeasonActivity
 
-PlayerSeasonActivity::PlayerSeasonActivity(const unsigned int id, PGC_ID_TYPE type, int progress)
+PlayerSeasonActivity::PlayerSeasonActivity(uint64_t id, PGC_ID_TYPE type, int progress)
     : pgc_id(id), pgcIdType(type) {
     if (type == PGC_ID_TYPE::SEASON_ID) {
         brls::Logger::debug("open season: {}", id);
