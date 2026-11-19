@@ -5,6 +5,14 @@
 *.so
 *.log
 
+# 真机 debug 归档与本地抓取产物
+# 可能包含签名 URL / trid / buvid，绝不能入库或 push
+/debug-runs/
+/output/
+/.playwright-cli/
+*.log.gz
+*.log.zip
+
 # 编辑器 / 系统 / 工具临时目录
 .vscode/
 .idea/
