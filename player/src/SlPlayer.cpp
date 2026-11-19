@@ -552,8 +552,23 @@ void Player::Impl::run() {
     bool videoStarted = false;
     bool afterSeek = false;
     bool audioScheduled = false;
+    /* 稳定后仍等画面位置走到目标点才启动音频；
+     * seek 后喂帧速率可能长时间低于墙钟，固定 delay 会必然失准。 */
+    bool audioPendingPosition = false;
+    double audioStartPositionMs = 0.0;
     std::uint64_t pendingResumeRequestId = 0;
     bool pendingResumeEvent = false;
+    /* D23 验收诊断：seek 入口到视频首帧提交的墙钟间隔，只在 --diag 下输出。 */
+    std::int64_t lastSeekStartMs = 0;
+    const bool playDiag = std::getenv("SL_PLAY_DIAG") != nullptr;
+    /* seek 后队列长期不稳定时的音频兜底，默认沿用既有 8s 量级；
+     * 只作为异常保护，正常路径必须走队列稳定分支。 */
+    int seekAudioFallbackMs = 8000;
+    if (const char* fallback = std::getenv("SL_SEEK_AUDIO_FALLBACK_MS")) {
+        int value = std::atoi(fallback);
+        if (value >= 1000)
+            seekAudioFallbackMs = value;
+    }
     uint32_t queueMax = 0;
     int queueFlatFrames = 0;
     int videoFrames = 0;
@@ -910,7 +925,8 @@ void Player::Impl::run() {
         if (audioContext && opened && audioSource_.audioIndex() >= 0) {
             selfDemux = true;
             audioReady = audio_.start(audioContext, audioSource_.format(),
-                                      audioSource_.audioIndex(), true);
+                                      audioSource_.audioIndex(), true,
+                                      &audioSource_);
         }
     } else if (videoSource_.audioIndex() >= 0) {
         audioContext = SLAudio_CreateContext();
@@ -946,6 +962,10 @@ void Player::Impl::run() {
         if (target < 0.0)
             target = 0.0;
         const double requestedTarget = target;
+        lastSeekStartMs = steadyNowMs();
+        if (playDiag)
+            fprintf(stderr, "[SlPlayer][diag] seek enter request=%.3f t=%lld\n",
+                    requestedTarget, (long long)lastSeekStartMs);
 
         int64_t ts = av_rescale_q((int64_t)(target * AV_TIME_BASE),
                                   AV_TIME_BASE_Q, stream->time_base);
@@ -979,11 +999,9 @@ void Player::Impl::run() {
                 requestedTarget, target, ok ? 1 : 0);
 
         if (audioReady) {
-            if (selfDemux)
-                audioSource_.beginSeek(requestedTarget);
-            audio_.seek(requestedTarget);
-            if (selfDemux)
-                audioSource_.endSeek();
+            /* D23：音频 seek 不阻塞视频首帧。音轨 demux/flush/SLAudio stream
+             * 重建都在音频线程完成，DASH 的 HTTP 窗口提示也由该线程设置。 */
+            audio_.requestSeek(requestedTarget);
         }
         audioBaseMs = requestedTarget * 1000.0;
         seekDisplayTargetMs = requestedTarget * 1000.0;
@@ -1008,6 +1026,8 @@ void Player::Impl::run() {
         videoStarted = false;
         afterSeek = true;
         audioScheduled = false;
+        audioPendingPosition = false;
+        audioStartPositionMs = 0.0;
         queueMax = 0;
         queueFlatFrames = 0;
         maxSubmittedMs = target * 1000.0;
@@ -1018,6 +1038,12 @@ void Player::Impl::run() {
         /* 新 seek 已到达时，旧 seek 的内部重建仍可能结束；不得覆盖新目标。 */
         if (requestId == 0 || requestId == latestSeekRequestId_.load())
             emit(EventType::Seeked, std::string(), requestId);
+        if (playDiag)
+            fprintf(stderr,
+                    "[SlPlayer][diag] seek return elapsed=%lldms "
+                    "audio_pending=%d\n",
+                    (long long)(steadyNowMs() - lastSeekStartMs),
+                    audioReady && audio_.seekPending() ? 1 : 0);
         return ok;
     };
 
@@ -1032,7 +1058,6 @@ void Player::Impl::run() {
     if (spec.startSeconds > 0.5)
         doSeek(spec.startSeconds, 0, false);
 
-    const bool playDiag = std::getenv("SL_PLAY_DIAG") != nullptr;
     auto lastDiag = std::chrono::steady_clock::now();
     while (!stop_) {
         if (playDiag) {
@@ -1063,6 +1088,8 @@ void Player::Impl::run() {
             videoStarted = false;
             afterSeek = true;
             audioScheduled = false;
+            audioPendingPosition = false;
+            audioStartPositionMs = 0.0;
             queueMax = 0;
             queueFlatFrames = 0;
             maxSubmittedMs = at * 1000.0;
@@ -1278,37 +1305,35 @@ void Player::Impl::run() {
                                     "[SlPlayer][diag] first submit pts=%.1f "
                                     "queued=%u vf=%d stage=%d\n",
                                     frameMs, queuedNow, videoFrames, stage_.load());
+                        if (playDiag && lastSeekStartMs > 0)
+                            fprintf(stderr,
+                                    "[SlPlayer][diag] first submit after seek: "
+                                    "age=%lldms audio_pending=%d\n",
+                                    (long long)(steadyNowMs() - lastSeekStartMs),
+                                    audioReady && audio_.seekPending() ? 1 : 0);
                         emit(EventType::PlaybackStart);
                     }
 
-                    /* seek/暂停恢复：按首帧 PTS 与实测上屏延迟安排音频启动时点，
-                     * 不再依赖 GetQueuedVideoMS 在重建初期的瞬时值或 3s 截断兜底。 */
+                    /* seek/暂停恢复：这里只记录首帧 PTS，不在此安排音频。
+                     * 新建 stream 的首帧 queued 往往是 0，队列还要数秒才爬到稳态；
+                     * 若按墙钟立刻 scheduleStart，音频会在画面队列追上前先到目标点。
+                     * 真正的启动点放到下面的队列稳定分支，统一按呈现位置计算。 */
                     if (afterSeek && !firstFrameAfterSeekRecorded) {
                         firstFrameAfterSeekRecorded = true;
                         firstFramePtsAfterSeekMs = frameMs;
-                        if (audioReady && measuredVideoLatencyMs > 0) {
-                            int delayMs = measuredVideoLatencyMs +
-                                          (int)(seekDisplayTargetMs - frameMs);
-                            if (delayMs < 0)
-                                delayMs = 0;
-                            audio_.setPaused(false);
-                            audio_.scheduleStart(delayMs, 0);
-                            audioScheduled = true;
-                            afterSeek = false;
-                            syncLog("seek start: target=%.0f first=%.0f latency=%d delay=%d",
-                                    seekDisplayTargetMs, frameMs,
-                                    measuredVideoLatencyMs, delayMs);
+                        syncLog("seek first frame: target=%.0f first=%.0f queued=%u",
+                                seekDisplayTargetMs, frameMs, queuedNow);
+                        if (playDiag)
                             fprintf(stderr,
-                                    "[SlPlayer] seek 对齐: 目标 %.0f ms / 首帧 %.0f ms / "
-                                    "上屏延迟 %d ms / 音频延时 %d ms\n",
-                                    seekDisplayTargetMs, frameMs,
-                                    measuredVideoLatencyMs, delayMs);
-                        }
+                                    "[SlPlayer][diag] seek first frame recorded: "
+                                    "target=%.0f first=%.0f queued=%u\n",
+                                    seekDisplayTargetMs, frameMs, queuedNow);
                     }
 
                     /* 恢复完成的定义：视频首帧已重建、音频启动已安排；
-                     * 此刻才发布当前暂停态，UI 图标不会再早于真实播放。 */
-                    if (pendingResumeEvent && firstFrameAfterSeekRecorded) {
+                     * 音频不可用时不受该条件阻塞，避免永远不发 Resumed。 */
+                    if (pendingResumeEvent && firstFrameAfterSeekRecorded &&
+                        (!audioReady || audioScheduled)) {
                         if (!targetPaused_.load()) {
                             emit(EventType::Resumed, std::string(),
                                  pendingResumeRequestId);
@@ -1318,7 +1343,8 @@ void Player::Impl::run() {
                         resumeInProgress_ = false;
                     }
 
-                    if (audioReady && !audioScheduled && videoFrames > 1 &&
+                    if (audioReady && !audioScheduled && !audioPendingPosition &&
+                        videoFrames > 1 &&
                         queuedNow > 0) {
                         if (queuedNow > queueMax + 5) {
                             queueMax = queuedNow;
@@ -1333,34 +1359,76 @@ void Player::Impl::run() {
                             queueFlatFrames >= 5) {
                             double offsetMs = presentationMs - audioBaseMs;
                             int skipMs = (int)std::max(0.0, std::min(offsetMs, 3000.0));
-                            int delayMs = (int)std::max(0.0, std::min(-offsetMs, 5000.0));
                             /* 带 start= 打开时第一帧也处于 afterSeek，旧条件会让
                              * measuredVideoLatencyMs 永远是 0，后续 seek 全部走
                              * 兜底分支而不是首帧对齐，表现为快进后音画不同步。 */
                             if (measuredVideoLatencyMs <= 0)
                                 measuredVideoLatencyMs = (int)queuedNow;
                             audio_.setPaused(false);
-                            audio_.scheduleStart(delayMs, skipMs);
-                            audioScheduled = true;
-                            afterSeek = false;
-                            fprintf(stderr,
-                                    "[SlPlayer] 视频已上屏: 内容 %.0f ms, 呈现 %.0f ms, "
-                                    "目标 %.0f ms, 队列 %u ms, 音频延时 %d ms, 跳过 %d ms\n",
-                                    submittedMs, presentationMs, audioBaseMs,
-                                    queuedNow, delayMs, skipMs);
+                            if (offsetMs <= 0.0) {
+                                /* 画面还没走到目标点：只登记目标位置，不按墙钟启动。
+                                 * 后面的逐帧循环会在 presentationMs 到达目标时启动音频。 */
+                                audioPendingPosition = true;
+                                audioStartPositionMs = audioBaseMs;
+                                syncLog("stable, wait position: target=%.0f first=%.0f "
+                                        "present=%.0f latency=%d wait=%.0f",
+                                        audioBaseMs, firstFramePtsAfterSeekMs,
+                                        presentationMs, measuredVideoLatencyMs,
+                                        -offsetMs);
+                                fprintf(stderr,
+                                        "[SlPlayer] 队列稳定，等待画面到达目标再启动音频: "
+                                        "呈现 %.0f ms, 目标 %.0f ms, 等待 %.0f ms, 队列 %u ms\n",
+                                        presentationMs, audioBaseMs, -offsetMs, queuedNow);
+                            } else {
+                                audio_.scheduleStart(0, skipMs);
+                                audioScheduled = true;
+                                afterSeek = false;
+                                syncLog("stable start: target=%.0f first=%.0f "
+                                        "present=%.0f latency=%d delay=0 skip=%d",
+                                        audioBaseMs, firstFramePtsAfterSeekMs,
+                                        presentationMs, measuredVideoLatencyMs, skipMs);
+                                fprintf(stderr,
+                                        "[SlPlayer] 队列稳定，画面已越过目标，安排音频启动点: "
+                                        "呈现 %.0f ms, 目标 %.0f ms, 跳过 %d ms\n",
+                                        presentationMs, audioBaseMs, skipMs);
+                            }
                         }
                     }
+
+                    if (audioReady && audioPendingPosition &&
+                        presentationMs >= audioStartPositionMs) {
+                        int skipMs = (int)std::max(
+                            0.0, std::min(presentationMs - audioStartPositionMs, 3000.0));
+                        audio_.setPaused(false);
+                        audio_.scheduleStart(0, skipMs);
+                        audioScheduled = true;
+                        audioPendingPosition = false;
+                        afterSeek = false;
+                        syncLog("position start: target=%.0f present=%.0f skip=%d",
+                                audioStartPositionMs, presentationMs, skipMs);
+                        fprintf(stderr,
+                                "[SlPlayer] 画面到达目标，启动音频: "
+                                "目标 %.0f ms, 呈现 %.0f ms, 跳过 %d ms\n",
+                                audioStartPositionMs, presentationMs, skipMs);
+                    }
+
+                    const bool seekFallback =
+                        (afterSeek || audioPendingPosition) && firstFrameAfterSeekRecorded &&
+                        steadyNowMs() - lastSeekStartMs >= seekAudioFallbackMs;
                     if (audioReady && !audioScheduled &&
-                        (!afterSeek && submittedMs > 8000.0)) {
+                        ((!afterSeek && submittedMs > 8000.0) || seekFallback)) {
                         double offsetMs = presentationMs - audioBaseMs;
                         int skipMs = (int)std::max(0.0, std::min(offsetMs, 10000.0));
                         int delayMs = (int)std::max(0.0, std::min(-offsetMs, 5000.0));
                         audio_.setPaused(false);
                         audio_.scheduleStart(delayMs, skipMs);
                         audioScheduled = true;
+                        audioPendingPosition = false;
+                        afterSeek = false;
                         fprintf(stderr,
-                                "[SlPlayer] 队列迟迟未稳定，音频兜底启动: "
+                                "[SlPlayer] %s队列迟迟未稳定，音频兜底启动: "
                                 "present=%.0f ms base=%.0f ms delay=%d ms skip=%d ms\n",
+                                seekFallback ? "seek " : "",
                                 presentationMs, audioBaseMs, delayMs, skipMs);
                     }
 

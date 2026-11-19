@@ -26,24 +26,28 @@ struct CSLAudioStream;
 
 namespace sl {
 
+class HttpSource;
+
 class AudioPipeline {
 public:
     AudioPipeline() = default;
     ~AudioPipeline();
 
     bool start(CSLAudioContext* context, AVFormatContext* format, int audioIndex,
-               bool selfDemux);
+               bool selfDemux, HttpSource* source = nullptr);
     /* 停止前先唤醒音频线程，避免播放线程等待包队列时 join 卡死。 */
     void interrupt();
     void stop();
 
     void putPacket(const AVPacket* packet);
     void setPaused(bool paused);
-    bool seek(double targetSeconds);
+    /* 非阻塞请求：立即阻断旧音频提交，实际 demux seek / flush / 重建由音频线程完成。 */
+    void requestSeek(double targetSeconds);
     void scheduleStart(int delayMs, int skipMs);
     void setVolume(int volume);
 
     bool started() const { return startedFlag_; }
+    bool seekPending() const { return seekRequest_.load(); }
     int rate() const { return rate_; }
     double submittedMs() const;
     double delayMs() const;
@@ -58,13 +62,16 @@ private:
     void submitDirect(const uint8_t* data, int size);
     bool drainFrame();
     bool seekInternal(double targetSeconds);
-    void completeSeek(bool ok);
+    void finishSeek(std::uint64_t sequence, bool ok);
     bool ensureStream();
     void writeFrame(void* output, const uint8_t* data, int size) const;
     int queueTarget() const;
+    void applyStartLocked(int delayMs, int skipMs);
+    void applyStartAtLocked(double atSeconds, int skipMs);
 
     CSLAudioContext* context_ = nullptr;
     AVFormatContext* format_ = nullptr;
+    HttpSource* source_ = nullptr;
     int audioIndex_ = -1;
     bool selfDemux_ = false;
 
@@ -95,10 +102,17 @@ private:
     std::condition_variable cond_;
     std::deque<AVPacket*> packets_;
     size_t packetBytes_ = 0;
+    /* seek 请求序列：音频线程只应用当前序列的完成，旧完成不得解除静音或启动点。 */
     std::atomic<bool> seekRequest_{false};
-    bool seekDone_ = false;
-    bool seekOk_ = false;
-    double seekTarget_ = 0.0;
+    std::atomic<bool> seekActive_{false};
+    std::atomic<bool> seekMuted_{false};
+    std::atomic<std::uint64_t> seekSequence_{0};
+    double seekTarget_ = 0.0; /* lock_ 保护 */
+    bool startPending_ = false;
+    double pendingStartAt_ = 0.0;
+    int pendingStartDelayMs_ = 0;
+    int pendingStartSkipMs_ = 0;
+    std::uint64_t pendingStartSequence_ = 0;
 
     std::atomic<bool> abort_{false};
     std::atomic<bool> paused_{false};

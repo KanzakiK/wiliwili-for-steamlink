@@ -1,5 +1,7 @@
 #include "AudioPipeline.h"
 
+#include "HttpSource.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -39,13 +41,14 @@ void AudioPipeline::interrupt() {
 }
 
 bool AudioPipeline::start(CSLAudioContext* context, AVFormatContext* format,
-                          int audioIndex, bool selfDemux) {
+                          int audioIndex, bool selfDemux, HttpSource* source) {
     stop();
     if (!context || !format || audioIndex < 0)
         return false;
 
     context_ = context;
     format_ = format;
+    source_ = source;
     audioIndex_ = audioIndex;
     selfDemux_ = selfDemux;
 
@@ -104,7 +107,13 @@ bool AudioPipeline::start(CSLAudioContext* context, AVFormatContext* format,
     abort_ = false;
     paused_ = false;
     seekRequest_ = false;
-    seekDone_ = false;
+    seekActive_ = false;
+    seekMuted_ = false;
+    seekSequence_ = 0;
+    seekTarget_ = 0.0;
+    startPending_ = false;
+    pendingStartAt_ = 0.0;
+    pendingStartSequence_ = 0;
 
     fprintf(stderr, "[SlAudio] 源 %d Hz -> SLAudio %d Hz / 2ch / %d 字节每帧（%d ms）\n",
             sourceRate, kSinkRateHz, frameBytes_, kFrameMs);
@@ -139,6 +148,7 @@ void AudioPipeline::stop() {
 
     context_ = nullptr;
     format_ = nullptr;
+    source_ = nullptr;
     audioIndex_ = -1;
     selfDemux_ = false;
     swrInputRate_ = 0;
@@ -150,18 +160,22 @@ void AudioPipeline::stop() {
     preroll_.clear();
     abort_ = false;
     paused_ = false;
+    seekRequest_ = false;
+    seekActive_ = false;
+    seekMuted_ = false;
+    startPending_ = false;
 }
 
 void AudioPipeline::putPacket(const AVPacket* packet) {
     if (!thread_.joinable())
         return;
     std::unique_lock<std::mutex> lock(lock_);
-    while (!abort_ && !seekRequest_ &&
+    while (!abort_ && !seekActive_ &&
            (packets_.size() >= (size_t)kPacketQueueMax ||
             packetBytes_ + (size_t)packet->size > kPacketQueueBytes)) {
         cond_.wait(lock);
     }
-    if (abort_ || seekRequest_)
+    if (abort_ || seekActive_)
         return;
 
     AVPacket* copy = av_packet_clone(packet);
@@ -181,29 +195,61 @@ void AudioPipeline::setVolume(int volume) {
     volume_ = std::min(100, std::max(0, volume));
 }
 
-bool AudioPipeline::seek(double targetSeconds) {
+void AudioPipeline::requestSeek(double targetSeconds) {
     if (!thread_.joinable())
-        return false;
+        return;
 
-    std::unique_lock<std::mutex> lock(lock_);
-    seekTarget_ = targetSeconds;
-    seekRequest_ = true;
-    seekDone_ = false;
-    seekOk_ = false;
+    std::uint64_t sequence;
+    {
+        std::lock_guard<std::mutex> lock(lock_);
+        sequence = seekSequence_.fetch_add(1) + 1;
+        seekTarget_ = targetSeconds;
+        seekRequest_.store(true);
+        seekActive_.store(true);
+        /* 请求当帧就阻断旧音频：writeFrame 输出静音，旧启动点失效。
+         * 已排队的压缩帧直接丢弃，解码线程持有的 PCM 在 seekInternal 中清理。 */
+        seekMuted_.store(true);
+        startPending_ = false;
+        startAt_.store(0.0);
+        skipMs_.store(0);
+        for (AVPacket* packet : packets_)
+            av_packet_free(&packet);
+        packets_.clear();
+        packetBytes_ = 0;
+    }
+    fprintf(stderr, "[SlAudio] seek queued seq=%llu target=%.3f\n",
+            (unsigned long long)sequence, targetSeconds);
     cond_.notify_all();
-    while (!seekDone_ && !abort_)
-        cond_.wait(lock);
-
-    bool ok = seekOk_;
-    seekDone_ = false;
-    seekRequest_ = false;
-    return ok;
 }
 
 void AudioPipeline::scheduleStart(int delayMs, int skipMs) {
-    skipMs_.store(std::max(0, skipMs));
-    startAt_.store(monotonicSeconds() + delayMs / 1000.0);
+    {
+        std::lock_guard<std::mutex> lock(lock_);
+        if (seekActive_.load()) {
+            /* 视频首帧可能早于音频 stream 重建完成；保留对齐参数，
+             * 让音频线程在新 stream 就绪后原样应用。这里必须保存绝对时刻：
+             * 若等 seek 完成后才用 delayMs 重新计时，会把等待 seek 的时间
+             * 再次加到音频延迟上，表现为 seek 后声音滞后。 */
+            startPending_ = true;
+            pendingStartAt_ = monotonicSeconds() + std::max(0, delayMs) / 1000.0;
+            pendingStartDelayMs_ = delayMs;
+            pendingStartSkipMs_ = skipMs;
+            pendingStartSequence_ = seekSequence_.load();
+        } else {
+            startPending_ = false;
+            applyStartLocked(delayMs, skipMs);
+        }
+    }
     cond_.notify_all();
+}
+
+void AudioPipeline::applyStartLocked(int delayMs, int skipMs) {
+    applyStartAtLocked(monotonicSeconds() + std::max(0, delayMs) / 1000.0, skipMs);
+}
+
+void AudioPipeline::applyStartAtLocked(double atSeconds, int skipMs) {
+    skipMs_.store(std::max(0, skipMs));
+    startAt_.store(atSeconds);
 }
 
 double AudioPipeline::submittedMs() const {
@@ -245,15 +291,17 @@ void AudioPipeline::threadMain() {
         while (!abort_) {
             bool seek = false;
             double target = 0.0;
+            std::uint64_t sequence = 0;
             {
                 std::lock_guard<std::mutex> lock(lock_);
                 if (seekRequest_) {
                     seek = true;
                     target = seekTarget_;
+                    sequence = seekSequence_.load();
                 }
             }
             if (seek) {
-                completeSeek(seekInternal(target));
+                finishSeek(sequence, seekInternal(target));
                 continue;
             }
             if (paused_) {
@@ -282,8 +330,9 @@ void AudioPipeline::threadMain() {
                 break;
             if (seekRequest_) {
                 double target = seekTarget_;
+                std::uint64_t sequence = seekSequence_.load();
                 lock.unlock();
-                completeSeek(seekInternal(target));
+                finishSeek(sequence, seekInternal(target));
                 continue;
             }
 
@@ -466,6 +515,14 @@ bool AudioPipeline::drainFrame() {
 }
 
 void AudioPipeline::writeFrame(void* output, const uint8_t* data, int size) const {
+    /* 请求 seek 后到新 stream 重建完成前，连已解码的旧 PCM 也不能出声。
+     * SLAudio 没有 flush/pause 接口，静音是请求入口能立即生效的唯一手段；
+     * 硬件队列里已提交的少量帧仍由 seekInternal 的 FreeStream 清掉。 */
+    if (seekMuted_.load()) {
+        memset(output, 0, (size_t)size);
+        return;
+    }
+
     int volume = volume_.load();
     if (volume >= 100) {
         memcpy(output, data, (size_t)size);
@@ -502,10 +559,19 @@ bool AudioPipeline::seekInternal(double targetSeconds) {
     bool ok = true;
 
     if (selfDemux_ && format_) {
-        AVStream* stream = format_->streams[audioIndex_];
-        int64_t ts = av_rescale_q((int64_t)(targetSeconds * AV_TIME_BASE),
-                                  AV_TIME_BASE_Q, stream->time_base);
-        ok = av_seek_frame(format_, audioIndex_, ts, AVSEEK_FLAG_BACKWARD) >= 0;
+        /* DASH 音轨由本线程解封装：HTTP Range 窗口提示必须在 av_seek_frame
+         * 外围设置，不能再由播放线程在同步 seek 外层代劳。 */
+        const bool hasSeekHint = source_ && source_->remote();
+        if (hasSeekHint)
+            source_->beginSeek(targetSeconds);
+        {
+            AVStream* stream = format_->streams[audioIndex_];
+            int64_t ts = av_rescale_q((int64_t)(targetSeconds * AV_TIME_BASE),
+                                      AV_TIME_BASE_Q, stream->time_base);
+            ok = av_seek_frame(format_, audioIndex_, ts, AVSEEK_FLAG_BACKWARD) >= 0;
+        }
+        if (hasSeekHint)
+            source_->endSeek();
         if (ok) {
             avformat_flush(format_);
         } else {
@@ -537,13 +603,32 @@ bool AudioPipeline::seekInternal(double targetSeconds) {
     return ok;
 }
 
-void AudioPipeline::completeSeek(bool ok) {
+void AudioPipeline::finishSeek(std::uint64_t sequence, bool ok) {
+    bool latest = false;
     {
         std::lock_guard<std::mutex> lock(lock_);
-        seekOk_ = ok;
-        seekDone_ = true;
+        latest = sequence == seekSequence_.load();
+        if (!latest) {
+            fprintf(stderr, "[SlAudio] 丢弃过期 seek seq=%llu current=%llu\n",
+                    (unsigned long long)sequence,
+                    (unsigned long long)seekSequence_.load());
+        } else {
+            seekRequest_.store(false);
+            /* 首帧对齐可能在音频 stream 重建完成前到达；此时原样应用，
+             * 保证 scheduleStart 的延时/skip 契约不因异步化而丢失。 */
+            if (startPending_ && pendingStartSequence_ == sequence) {
+                applyStartAtLocked(pendingStartAt_, pendingStartSkipMs_);
+                startPending_ = false;
+            }
+            seekActive_.store(false);
+            seekMuted_.store(false);
+        }
     }
     cond_.notify_all();
+    if (latest) {
+        fprintf(stderr, "[SlAudio] seek done seq=%llu ok=%d\n",
+                (unsigned long long)sequence, ok ? 1 : 0);
+    }
 }
 
 } // namespace sl
