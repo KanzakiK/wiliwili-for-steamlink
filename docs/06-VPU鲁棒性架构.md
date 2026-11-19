@@ -28,6 +28,7 @@
 | IPC 范围 | 只走控制面与事件面；视频帧/PCM 仍走 SLVideo/SLAudio 硬件层 | 数据不过 IPC，性能损失可忽略 |
 | 脏退出检测 | Dirty Flag 锁文件 `/tmp/slplayer_vpu.lock`，不做开机 1 帧 H.264 探针 | 探针本身要 Create/Destroy stream，可能成为新污染源 |
 | watchdog 位置 | 独立线程放在 libmpv 兼容层（主进程侧），不放 SlPlayer | 监控者必须独立于被监控者；卡死的主循环无法自我检测 |
+| D22 软卡顿处理 | 只发一次播放页提示，不自动降清晰度、不重开播放 | 不同清晰度/片源压力不同，自动降级会误伤并打断当前 session；用户自行选择更稳妥 |
 | watchdog 形态 | 只读无锁 atomic 快照，不取播放线程锁、不调 stats()、不碰 VPU | 避免被播放线程阻塞；检测线程不能成为新的死锁点 |
 | 异常处理职责 | watchdog 只判定并触发上层恢复，不在 SlPlayer 内 `_exit()` | SlPlayer 是库，进程生命周期由上层管理 |
 | 父进程死亡清理 | `PR_SET_PDEATHSIG` + `getppid()` 复核 + IPC EOF 双保险 | PDEATHSIG 是父线程语义且 handler 中不能调 VPU/锁，必须用 EOF 兜底 |
@@ -87,14 +88,48 @@ Dirty Flag 语义：
 - 30 秒内最多自动重启 3 次，避免 fork 风暴。
 - 新 daemon 从启动到首帧期间挂起 watchdog，避免慢开流误判。
 
-### 4. 父进程死亡清理
+### 4. D22 软卡顿检测与提示
+
+D22 与 watchdog 分层：
+
+- watchdog 只判定硬故障：无心跳、worker 退出、长时间无新帧，继续 SIGKILL + 重启 daemon。
+- D22 只判定软卡顿：仍在持续喂帧，但呈现位置长期不推进或推进断续；命中后发一次播放页提示，不触发进程重启。
+- 两者复用 compat 的 500ms heartbeat 轮询，但判据和动作分开；不新增高频线程，`frameAge` 到达硬 watchdog 阈值时不发 D22 提示，避免重复抢判。
+
+heartbeat 扩展字段：
+
+- `presentationMs`：直接用播放线程已有的无锁 `position_`，不调用 `stats()`。
+- `videoQueueMs`：用无锁 `videoQueueMs_`，辅助识别队列增长。
+- `networkErrorAgeMs`：HTTP 重试/下载失败时刷新原子时间戳，用于近期网络错误排除。
+
+软卡顿判据（阈值先用 env 校准）：
+
+```text
+playing=true
+&& 未暂停、未 seek、未处于 inTransition
+&& 已过首帧与 resume grace
+&& frameAge 未到 watchdog 硬故障阈值
+&& 最近 3s 没有网络错误
+&& 连续 8s 内 presentationMs 高水位推进 < 250ms
+&& 期间 videoFrames 仍在增长
+```
+
+动作边界：
+
+- compat 发出一次性健康事件，映射到播放页 `VideoView::HINT`。
+- 提示文案固定为“播放不流畅，可尝试切换到 720P”。
+- 每个 generation/session 只提示一次；新文件、用户切清晰度或 watchdog 重启后重置。
+- 不调用 `updateVideoLink()`，不改 `SettingItem::VIDEO_QUALITY`，不自动重开当前播放。
+- 如果当前已是 720P 或没有低档，仍只提示一次，不做重复动作。
+
+### 5. 父进程死亡清理
 
 - fork 前记录父 PID，子进程设 `PR_SET_PDEATHSIG` 并通过 `--expected-parent` 接收 PID。
 - 收到 SIGTERM 后只置标志；主循环与 accept 等待循环复核 `getppid()`。
 - IPC EOF 是第二道保险：控制连接断开即进入退出流程。
 - 只有确认父进程已失联或控制通道断开，才执行完整 shutdown；避免多线程 PDEATHSIG 误触发。
 
-### 5. VPU 重建与 SHM
+### 6. VPU 重建与 SHM
 
 - 新建流后尚未提交帧时的 start seek、暂停已 flush 后的恢复 seek，不重复 Free/Create。
 - 用户主动 seek 保持重建语义，因为 SLVideo 没有 flush 接口。
