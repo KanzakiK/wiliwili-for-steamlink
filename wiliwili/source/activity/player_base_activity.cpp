@@ -378,6 +378,12 @@ void BasePlayerActivity::setCommonData() {
             case MpvEventEnum::RESTART:
                 this->updateVideoLink();
                 break;
+            case MpvEventEnum::LOADING_END:
+                this->completeAutoDowngradeIfPlaying();
+                break;
+            case MpvEventEnum::MPV_FILE_ERROR:
+                this->failAutoDowngrade("playback_error");
+                break;
             default:
                 break;
         }
@@ -494,7 +500,10 @@ void BasePlayerActivity::resetSessionQualityOverride() {
     hardAutoDowngradeApplied        = false;
     autoDowngradePending            = false;
     autoDowngradeFromQn             = 0;
+    autoDowngradeToQn               = 0;
+    autoDowngradeNewSession.clear();
     autoDowngradeOldSession.clear();
+    ++autoDowngradeRequestSeq;
 }
 
 bool BasePlayerActivity::autoDowngradeForHardStall() {
@@ -502,35 +511,85 @@ bool BasePlayerActivity::autoDowngradeForHardStall() {
     if (videoUrlResult.accept_quality.empty()) return false;
 
     int fromQn = videoUrlResult.quality;
+    // 只对 1080P / 1080P+ / 1080P60 做一次性降级；720P 及以下不再继续降。
+    if (fromQn != 80 && fromQn != 112 && fromQn != 116) return false;
+    constexpr int kTargetQn = 64;
     bool targetAvailable = false;
     for (int q : videoUrlResult.accept_quality) {
-        if (q == 64) {
+        if (q == kTargetQn) {
             targetAvailable = true;
             break;
         }
     }
-    if (!targetAvailable || fromQn <= 64) return false;
+    if (!targetAvailable) return false;
 
     hardAutoDowngradeApplied   = true;
-    sessionQualityOverride     = 64;
+    sessionQualityOverride     = kTargetQn;
     sessionQualityContentKey   = currentContentKey();
     autoDowngradePending       = true;
     autoDowngradeFromQn        = fromQn;
+    autoDowngradeToQn          = kTargetQn;
+    autoDowngradeNewSession.clear();
     autoDowngradeOldSession    = wiliwili::d27::currentSession();
+    uint64_t requestSeq        = ++autoDowngradeRequestSeq;
 
     char detail[256];
     snprintf(detail, sizeof(detail),
-             "scene=auto_quality_downgrade reason=hard_stall from_qn=%d to_qn=64 "
+             "scene=auto_quality_downgrade reason=hard_stall from_qn=%d to_qn=%d "
              "old_session=%s status=sent",
-             fromQn, autoDowngradeOldSession.c_str());
+             fromQn, kTargetQn, autoDowngradeOldSession.c_str());
     wiliwili::d27::log("CMD", detail);
 
     this->updateVideoLink();
 
+    ASYNC_RETAIN
+    brls::delay(60000, [ASYNC_TOKEN, this, requestSeq]() {
+        ASYNC_RELEASE
+        if (autoDowngradePending && autoDowngradeRequestSeq == requestSeq)
+            failAutoDowngrade("playback_timeout");
+    });
+    return true;
+}
+
+void BasePlayerActivity::completeAutoDowngradeIfPlaying() {
+    if (!autoDowngradePending || !activityShown) return;
+    if (videoUrlResult.quality != autoDowngradeToQn) return;
+    if (!MPVCore::instance().isPlaying()) return;
+
+    std::string session = wiliwili::d27::currentSession();
+    if (!autoDowngradeNewSession.empty() && session != autoDowngradeNewSession) return;
+
+    char detail[320];
+    snprintf(detail, sizeof(detail),
+             "scene=auto_quality_downgrade reason=hard_stall from_qn=%d to_qn=%d "
+             "old_session=%s new_session=%s status=ok",
+             autoDowngradeFromQn, autoDowngradeToQn,
+             autoDowngradeOldSession.c_str(), session.c_str());
+    wiliwili::d27::log("CMD", detail);
+    autoDowngradePending = false;
+
     static const char* hint = "播放卡顿，已自动降低清晰度";
     wiliwili::d27::log("UI", "health hint shown reason=hard action=auto_downgrade");
     APP_E->fire(VideoView::HINT, (void*)hint);
-    return true;
+}
+
+void BasePlayerActivity::failAutoDowngrade(const char* reason) {
+    if (!autoDowngradePending) return;
+    std::string session = wiliwili::d27::currentSession();
+    if (!autoDowngradeNewSession.empty() && session != autoDowngradeNewSession) return;
+
+    char detail[256];
+    snprintf(detail, sizeof(detail),
+             "scene=auto_quality_downgrade reason=hard_stall from_qn=%d to_qn=%d "
+             "old_session=%s status=error failure=%s",
+             autoDowngradeFromQn, autoDowngradeToQn,
+             autoDowngradeOldSession.c_str(), reason);
+    wiliwili::d27::log("CMD", detail);
+    autoDowngradePending = false;
+
+    static const char* hint = "播放卡顿，已尝试自动恢复";
+    wiliwili::d27::log("UI", "health hint shown reason=hard action=recovery_only");
+    APP_E->fire(VideoView::HINT, (void*)hint);
 }
 
 void BasePlayerActivity::setVideoQuality() {
@@ -758,17 +817,8 @@ void BasePlayerActivity::onVideoPlayUrl(const bilibili::VideoUrlResult& result) 
                                                         : videoDetailPage.cid),
                                      std::to_string(result.quality));
 
-        if (autoDowngradePending) {
-            std::string newSession = wiliwili::d27::currentSession();
-            char detail[256];
-            snprintf(detail, sizeof(detail),
-                     "scene=auto_quality_downgrade reason=hard_stall from_qn=%d to_qn=64 "
-                     "old_session=%s new_session=%s status=ok",
-                     autoDowngradeFromQn, autoDowngradeOldSession.c_str(),
-                     newSession.c_str());
-            wiliwili::d27::log("CMD", detail);
-            autoDowngradePending = false;
-        }
+        if (autoDowngradePending)
+            autoDowngradeNewSession = wiliwili::d27::currentSession();
     }
 
     if (!result.dash.video.empty()) {

@@ -147,6 +147,8 @@ private:
 
     // D22 硬卡顿自动降级只作用于当前内容，不写回用户设置。
     bool autoDowngradeForHardStall();
+    void completeAutoDowngradeIfPlaying();
+    void failAutoDowngrade(const char* reason);
     std::string currentContentKey() const;
     void resetSessionQualityOverride();
     std::string sessionQualityContentKey;
@@ -154,7 +156,10 @@ private:
     bool hardAutoDowngradeApplied = false;
     bool autoDowngradePending = false;
     int autoDowngradeFromQn = 0;
+    int autoDowngradeToQn = 0;
+    std::string autoDowngradeNewSession;
     std::string autoDowngradeOldSession;
+    uint64_t autoDowngradeRequestSeq = 0;
 };
 
 class PlayerActivity : public BasePlayerActivity {

@@ -269,13 +269,38 @@ if grep -F "watchdog stall" "$RUN_DIR/wiliwili.log" >/dev/null 2>&1; then
         fi
         AUTO_DOWNGRADE_QN=$(grep -F "scene=auto_quality_downgrade reason=hard_stall" "$RUN_DIR/wiliwili.log" 2>/dev/null |
             sed -n 's/.* to_qn=\([^ ]*\).*/\1/p' | sort -u | head -1)
+        AUTO_DOWNGRADE_FROM_QN=$(grep -F "scene=auto_quality_downgrade reason=hard_stall" "$RUN_DIR/wiliwili.log" 2>/dev/null |
+            sed -n 's/.* from_qn=\([^ ]*\).*/\1/p' | sort -u | head -1)
+        case "$AUTO_DOWNGRADE_FROM_QN" in
+            80|112|116) pass "自动降级来源 qn=$AUTO_DOWNGRADE_FROM_QN" ;;
+            *) fail "自动降级来源 qn 非 1080P 三档: $AUTO_DOWNGRADE_FROM_QN" ;;
+        esac
         if [ "$AUTO_DOWNGRADE_QN" = "64" ]; then
             pass "自动降级目标 qn=64"
+            if grep -F "scene=auto_quality_downgrade reason=hard_stall" "$RUN_DIR/wiliwili.log" 2>/dev/null |
+               grep -E "status=error|status=timeout" >/dev/null 2>&1; then
+                fail "自动降级后出现失败/超时"
+            else
+                pass "自动降级无失败/超时"
+            fi
             check_pattern wiliwili.log "detail=cid=" "降级后仍有权威内容详情"
             if grep -E "content start .* qn=64 " "$RUN_DIR/wiliwili.log" >/dev/null 2>&1; then
                 pass "新 session content start qn=64"
             else
                 fail "新 session content start 未记录 qn=64"
+            fi
+            AUTO_DOWNGRADE_NEW_SESSION=$(grep -F "scene=auto_quality_downgrade reason=hard_stall" "$RUN_DIR/wiliwili.log" 2>/dev/null |
+                grep -F "status=ok" | sed -n 's/.* new_session=\([^ ]*\).*/\1/p' | head -1)
+            if [ -n "$AUTO_DOWNGRADE_NEW_SESSION" ]; then
+                check_both wiliwili.log "[session=$AUTO_DOWNGRADE_NEW_SESSION]" "playback start status=ok" "降级后真实起播"
+                if grep -F "[session=$AUTO_DOWNGRADE_NEW_SESSION]" "$RUN_DIR/wiliwili.log" 2>/dev/null |
+                   grep -F "media " | grep -F "qn=30064 " >/dev/null 2>&1; then
+                    pass "降级后 player media qn=64"
+                else
+                    fail "降级后 player media 未记录 qn=64"
+                fi
+            else
+                fail "自动降级完成日志缺少 new_session"
             fi
         else
             fail "自动降级目标错误: qn=$AUTO_DOWNGRADE_QN"

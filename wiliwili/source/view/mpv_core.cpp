@@ -1156,7 +1156,7 @@ void MPVCore::eventMainLoop() {
                         if (data) {
                             int reason = *(int *)data;
                             static const char* softHint = "播放不流畅，可尝试降低清晰度";
-                            static const char* hardHint = "播放卡顿，已尝试自动恢复，可尝试降低清晰度";
+                            static const char* hardHint = "播放卡顿，已尝试自动恢复";
                             if (reason == 2) {
                                 bool handled = false;
                                 APP_E->fire(VideoView::AUTO_QUALITY_DOWNGRADE, &handled);
