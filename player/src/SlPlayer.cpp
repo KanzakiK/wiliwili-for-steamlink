@@ -1193,7 +1193,9 @@ void Player::Impl::run() {
         syncStartSkipMs = 0.0;
         queueMax = 0;
         queueFlatFrames = 0;
-        maxSubmittedMs = requestedTarget * 1000.0;
+        /* 呈现估计只能由本 epoch 首帧的真实 pts 推进；用目标预置会让
+         * 队列增长时 presentationMs 从目标值倒退并触发同步误判。 */
+        maxSubmittedMs = 0.0;
         videoClock = requestedTarget;
         position_ = requestedTarget;
         nextDeadline = std::chrono::steady_clock::now();
@@ -1305,7 +1307,7 @@ void Player::Impl::run() {
             syncStartSkipMs = 0.0;
             queueMax = 0;
             queueFlatFrames = 0;
-            maxSubmittedMs = at * 1000.0;
+            maxSubmittedMs = 0.0;
             audioBaseMs = at * 1000.0;
             lastSeekTargetMs = at * 1000.0;
             seekDisplayTargetMs = at * 1000.0;
@@ -1372,7 +1374,7 @@ void Player::Impl::run() {
             syncStartSkipMs = 0.0;
             queueMax = 0;
             queueFlatFrames = 0;
-            maxSubmittedMs = at * 1000.0;
+            maxSubmittedMs = 0.0;
             audioBaseMs = at * 1000.0;
             lastSeekTargetMs = at * 1000.0;
             seekDisplayTargetMs = at * 1000.0;
