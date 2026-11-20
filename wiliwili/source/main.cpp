@@ -14,6 +14,7 @@
 #include "utils/config_helper.hpp"
 #include "utils/debug_log.hpp"
 #include "utils/activity_helper.hpp"
+#include "activity/player_activity.hpp"
 #include "view/mpv_core.hpp"
 #include "view/video_view.hpp"
 
@@ -89,6 +90,43 @@ void d27ExpectPosition(const std::string& scene, double target, int attempts) {
     }
     brls::delay(200, [scene, target, attempts]() {
         d27ExpectPosition(scene, target, attempts - 1);
+    });
+}
+
+BasePlayerActivity* d27CurrentPlayerActivity() {
+    auto stack = brls::Application::getActivitiesStack();
+    for (auto it = stack.rbegin(); it != stack.rend(); ++it) {
+        if (auto* playerActivity = dynamic_cast<BasePlayerActivity*>(*it))
+            return playerActivity;
+    }
+    return nullptr;
+}
+
+void d27ExpectQuality(const std::string& scene, int qn,
+                      const std::string& oldSession, int attempts,
+                      const std::function<void()>& done) {
+    auto* playerActivity = d27CurrentPlayerActivity();
+    std::string session = wiliwili::d27::currentSession();
+    if (playerActivity && session != oldSession &&
+        playerActivity->getQualityCodeForDebug() == qn &&
+        MPVCore::instance().isPlaying()) {
+        char detail[192];
+        snprintf(detail, sizeof(detail),
+                 "qn=%d old_session=%s new_session=%s status=ok", qn,
+                 oldSession.c_str(), session.c_str());
+        d27Log("CMD", scene, detail);
+        done();
+        return;
+    }
+    if (attempts <= 0) {
+        char detail[128];
+        snprintf(detail, sizeof(detail),
+                 "qn=%d status=timeout waiting=new_session_and_playing", qn);
+        d27Log("CMD", scene, detail);
+        return;
+    }
+    brls::delay(200, [scene, qn, oldSession, attempts, done]() {
+        d27ExpectQuality(scene, qn, oldSession, attempts - 1, done);
     });
 }
 
@@ -252,6 +290,31 @@ int main(int argc, char* argv[]) {
                                              [scene]() { d27Log("CMD", scene, "status=ok"); });
                         });
                     });
+                });
+            } else if (scene == "quality_change") {
+                int qn = atoi(d27Arg(args, "qn").c_str());
+                if (qn <= 0) {
+                    d27Log("CMD", scene, "status=error missing_qn");
+                    return EXIT_FAILURE;
+                }
+                d27ExpectPlaying(scene, timeout * 5, [scene, qn, timeout]() {
+                    auto* playerActivity = d27CurrentPlayerActivity();
+                    if (!playerActivity) {
+                        d27Log("CMD", scene, "status=error no_player_activity");
+                        return;
+                    }
+                    std::string oldSession = wiliwili::d27::currentSession();
+                    int oldQn = playerActivity->getQualityCodeForDebug();
+                    char detail[192];
+                    snprintf(detail, sizeof(detail),
+                             "qn=%d old_qn=%d old_session=%s status=sent", qn, oldQn,
+                             oldSession.c_str());
+                    d27Log("CMD", scene, detail);
+                    if (!playerActivity->setQualityCodeForDebug(qn)) {
+                        d27Log("CMD", scene, "status=error invalid_qn");
+                        return;
+                    }
+                    d27ExpectQuality(scene, qn, oldSession, timeout * 5, []() {});
                 });
             } else {
                 d27Log("CMD", scene, "status=error unknown_scene");

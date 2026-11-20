@@ -59,6 +59,10 @@ public:
     // 设置清晰度
     void setVideoQuality();
 
+    // D27 debug-only helper: 直接设置清晰度码并复用原生重新取流路径，不打开下拉框。
+    bool setQualityCodeForDebug(int qn);
+    int getQualityCodeForDebug() const;
+
     // 切换评论模式
     void setCommentMode();
 

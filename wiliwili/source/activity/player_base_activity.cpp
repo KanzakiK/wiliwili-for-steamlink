@@ -537,6 +537,32 @@ void BasePlayerActivity::setVideoQuality() {
     });
 }
 
+bool BasePlayerActivity::setQualityCodeForDebug(int qn) {
+    if (qn <= 0 || this->videoUrlResult.accept_quality.empty()) return false;
+
+    bool supported = false;
+    for (int code : this->videoUrlResult.accept_quality) {
+        if (code > 116 && code != 192) continue;
+        if (code == qn) {
+            supported = true;
+            break;
+        }
+    }
+    if (!supported) return false;
+
+    BasePlayerActivity::defaultQuality = qn;
+    ProgramConfig::instance().setSettingItem(SettingItem::VIDEO_QUALITY, qn);
+    if (ProgramConfig::instance().getCSRF().empty() && defaultQuality >= 32)
+        return false;
+
+    this->updateVideoLink();
+    return true;
+}
+
+int BasePlayerActivity::getQualityCodeForDebug() const {
+    return this->videoUrlResult.quality;
+}
+
 void BasePlayerActivity::setCommentMode() {
     this->recyclingGrid->estimatedRowHeight = 100;
     this->recyclingGrid->showSkeleton();

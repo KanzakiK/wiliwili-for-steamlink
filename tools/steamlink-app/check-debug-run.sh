@@ -72,8 +72,8 @@ check_file "dmesg.$SCENE.ok.txt"
 
 check_pattern wiliwili.log "[boot] run=$RUN_ID" "boot run id"
 check_pattern wiliwili.log "][CMD][run=$RUN_ID][session=" "统一 CMD 行"
-check_pattern wiliwili.log "scene=$SCENE status=start" "CMD status=start"
-check_pattern wiliwili.log "scene=$SCENE status=ok" "CMD status=ok"
+check_both wiliwili.log "scene=$SCENE" "status=start" "CMD status=start"
+check_both wiliwili.log "scene=$SCENE" "status=ok" "CMD status=ok"
 
 if grep -Eq '^\[[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}\]\[[A-Z]+\]\[run=' \
         "$RUN_DIR/wiliwili.log"; then
@@ -88,7 +88,8 @@ else
     pass "统一日志无旧 source 前缀"
 fi
 
-SESSION=$(grep -F "scene=$SCENE status=ok" "$RUN_DIR/wiliwili.log" 2>/dev/null |
+SESSION=$(grep -F "scene=$SCENE" "$RUN_DIR/wiliwili.log" 2>/dev/null |
+    grep -F "status=ok" |
     sed -n 's/.*\[session=\([^]]*\)\].*/\1/p' | grep -v '^-' | head -1)
 if [ -z "$SESSION" ]; then
     fail "场景没有有效 session"
@@ -97,7 +98,7 @@ else
     PREFIX="[run=$RUN_ID][session=$SESSION]"
 
     case "$SCENE" in
-        play|seek_forward|seek_backward|pause_resume)
+        play|seek_forward|seek_backward|pause_resume|quality_change)
             check_pattern wiliwili.log "][UI]$PREFIX" "UI 统一行"
             check_pattern wiliwili.log "][UI]$PREFIX[gen=-][req=-] content start" "UI content start"
             check_pattern wiliwili.log "][COMPAT]$PREFIX" "compat 统一行"
@@ -176,6 +177,31 @@ else
                         check_both wiliwili.log "$PREFIX" "scene=$SCENE mode=delta" "seek delta mode"
                     else
                         fail "seek 场景缺少 target 或 delta"
+                    fi
+                    ;;
+                quality_change)
+                    SCENE_ARGS=$(sed -n 's/^args=//p' "$RUN_DIR/manifest.txt" 2>/dev/null | head -1)
+                    REQUESTED_QN=$(printf '%s' "$SCENE_ARGS" | sed -n 's/.*qn=\([^;]*\).*/\1/p')
+                    if [ -z "$REQUESTED_QN" ]; then
+                        fail "quality_change 缺少 qn"
+                    else
+                        check_both wiliwili.log "[run=$RUN_ID]" "scene=quality_change qn=$REQUESTED_QN old_qn=" "quality qn 请求"
+                        check_both wiliwili.log "$PREFIX" "scene=quality_change qn=$REQUESTED_QN old_session=" "quality 新 session 完成"
+                        OLD_SESSION=$(grep -F "scene=quality_change qn=$REQUESTED_QN" "$RUN_DIR/wiliwili.log" 2>/dev/null |
+                            grep -F "status=sent" | sed -n 's/.* old_session=\([^ ]*\).*/\1/p' | head -1)
+                        if [ -z "$OLD_SESSION" ]; then
+                            fail "quality_change 缺少旧 session"
+                        elif [ "$OLD_SESSION" = "$SESSION" ]; then
+                            fail "quality_change 未创建新 session"
+                        else
+                            pass "quality_change 旧 session=$OLD_SESSION，新 session=$SESSION"
+                            check_both wiliwili.log "[run=$RUN_ID][session=$OLD_SESSION]" "content start" "旧 session content start"
+                        fi
+                        if [ -n "$UI_QN" ] && [ "$UI_QN" = "$REQUESTED_QN" ]; then
+                            pass "新 session qn=$UI_QN 与请求一致"
+                        else
+                            fail "新 session qn=$UI_QN 与请求 qn=$REQUESTED_QN 不一致"
+                        fi
                     fi
                     ;;
                 pause_resume)
