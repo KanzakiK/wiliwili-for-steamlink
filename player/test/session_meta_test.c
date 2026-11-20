@@ -146,6 +146,20 @@ int main(void) {
     CHECK(context.valid == 0);
     CHECK(sl_sync_context_consume(&context, 1, 2, &out, &mismatch) == 0);
 
+    /* S05：extra 中的控制提示保留毫秒，URL 引号内逗号不能干扰解析。 */
+    int64_t hint = -1;
+    CHECK(sl_extra_int64(
+              "referrer=\"https://example.invalid/?a=1,b=2\","
+              "target_ms=5123,pause=1",
+              "target_ms", &hint) == 1);
+    CHECK(hint == 5123);
+    CHECK(sl_extra_int64(
+              "referrer=\"https://example.invalid/?a=1,b=2\","
+              "target_ms=5123,pause=1",
+              "pause", &hint) == 1);
+    CHECK(hint == 1);
+    CHECK(sl_extra_int64("target_ms=bad", "target_ms", &hint) == 0);
+
     printf("session meta contract ok\n");
     return 0;
 }

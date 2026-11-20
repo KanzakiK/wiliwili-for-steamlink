@@ -828,7 +828,7 @@ std::string VideoView::getDebugRun() { return debugRun; }
 
 std::string VideoView::getDebugSession() { return debugSession; }
 
-std::string VideoView::genExtraUrlParam(int start, int end, const std::string& audio) {
+std::string VideoView::genExtraUrlParam(double start, int end, const std::string& audio) {
     std::vector<std::string> audios;
     if (!audio.empty()) {
         audios.emplace_back(audio);
@@ -836,7 +836,7 @@ std::string VideoView::genExtraUrlParam(int start, int end, const std::string& a
     return genExtraUrlParam(start, end, audios);
 }
 
-std::string VideoView::genExtraUrlParam(int start, int end, const std::vector<std::string>& audios) {
+std::string VideoView::genExtraUrlParam(double start, int end, const std::vector<std::string>& audios) {
     std::string extra =
 #ifdef __PSV__
         "referrer=\"https://www.bilibili.com\",network-timeout=10";
@@ -847,11 +847,18 @@ std::string VideoView::genExtraUrlParam(int start, int end, const std::vector<st
     if (!proxy.empty()) {
         extra += fmt::format(",http-proxy=\"{}\"", proxy);
     }
+    if (controlTargetMs > 0) {
+        start = (double)controlTargetMs / 1000.0;
+        extra += fmt::format(",target_ms={}", controlTargetMs);
+    }
     if (start > 0) {
-        extra += fmt::format(",start={}", start);
+        extra += fmt::format(",start={:.3f}", start);
     }
     if (end > 0) {
         extra += fmt::format(",end={}", end);
+    }
+    if (MPVCore::instance().isPaused()) {
+        extra += ",pause=1";
     }
     for (auto& audio : audios) extra += fmt::format(",audio-file=\"{}\"", audio);
     if (!debugRun.empty()) {
@@ -867,7 +874,7 @@ std::string VideoView::genExtraUrlParam(int start, int end, const std::vector<st
     return extra;
 }
 
-void VideoView::setUrl(const std::string& url, int start, int end, const std::string& audio) {
+void VideoView::setUrl(const std::string& url, double start, int end, const std::string& audio) {
     std::vector<std::string> audios;
     if (!audio.empty()) {
         audios.emplace_back(audio);
@@ -875,15 +882,15 @@ void VideoView::setUrl(const std::string& url, int start, int end, const std::st
     setUrl(url, start, end, audios);
 }
 
-void VideoView::setUrl(const std::string& url, int start, int end, const std::vector<std::string>& audios) {
+void VideoView::setUrl(const std::string& url, double start, int end, const std::vector<std::string>& audios) {
     mpvCore->setUrl(url, genExtraUrlParam(start, end, audios));
 }
 
-void VideoView::setBackupUrl(const std::string& url, int start, int end, const std::string& audio) {
+void VideoView::setBackupUrl(const std::string& url, double start, int end, const std::string& audio) {
     setBackupUrl(url, start, end, std::vector{audio});
 }
 
-void VideoView::setBackupUrl(const std::string& url, int start, int end, const std::vector<std::string>& audios) {
+void VideoView::setBackupUrl(const std::string& url, double start, int end, const std::vector<std::string>& audios) {
     mpvCore->setBackupUrl(url, genExtraUrlParam(start, end, audios));
 }
 

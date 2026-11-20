@@ -3,6 +3,7 @@
 //
 
 #include <utility>
+#include <cmath>
 #include <borealis/core/thread.hpp>
 #include <borealis/core/touch/tap_gesture.hpp>
 #include <borealis/views/applet_frame.hpp>
@@ -464,8 +465,13 @@ void BasePlayerActivity::showCoinDialog(uint64_t aid) {
 }
 
 void BasePlayerActivity::updateVideoLink() {
-    // 设置视频加载后跳转的时间
+    // 显示进度继续用整数秒；控制目标在异步请求链接前冻结为毫秒。
     setProgress(MPVCore::instance().video_progress);
+    double precise = MPVCore::instance().getPlaybackTime();
+    if (precise <= 0.0)
+        precise = (double)MPVCore::instance().video_progress;
+    controlTargetMs = (int64_t)(precise * 1000.0 + 0.5);
+    this->video->setControlTargetMs(controlTargetMs);
     int requestedQuality = sessionQualityOverride > 0 ? sessionQualityOverride
                                                       : defaultQuality;
 
@@ -720,8 +726,14 @@ void BasePlayerActivity::onVideoPlayUrl(const bilibili::VideoUrlResult& result) 
     // 有效期 110 分钟
     videoDeadline = std::chrono::system_clock::now() + std::chrono::seconds(6600);
 
-    // 获取预设的跳转位置
-    int start    = this->getProgress();
+    // 获取预设的跳转位置；控制目标保留亚秒，展示进度仍用整数秒。
+    double start = controlTargetMs >= 0
+                       ? (double)controlTargetMs / 1000.0
+                       : (double)this->getProgress();
+    if (controlTargetMs < 0) {
+        controlTargetMs = (int64_t)(start * 1000.0 + 0.5);
+        this->video->setControlTargetMs(controlTargetMs);
+    }
     int end      = -1;
     int clipOpen = result.clipOpen, clipEnd = result.clipEnd;
     int time_sec = result.timelength / 1000;
@@ -753,12 +765,12 @@ void BasePlayerActivity::onVideoPlayUrl(const bilibili::VideoUrlResult& result) 
     MPVCore::instance().setAspect(customAspect);
 
     // 当要跳转的进度距离尾部只有 5s，就重新播放
-    if (start > 0 && abs(time_sec - start) <= 5) start = 0;
+    if (start > 0 && std::fabs((double)time_sec - start) <= 5.0) start = 0;
 
     // 跳过片头片尾
     if (PLAYER_SKIP_OPENING_CREDITS) {
-        start = std::max(start, clipOpen);
-        if (clipEnd > 0) start = std::min(start, clipEnd);
+        start = std::max(start, (double)clipOpen);
+        if (clipEnd > 0) start = std::min(start, (double)clipEnd);
         end = clipEnd;
         brls::Logger::debug("片头片尾: {}/{}", clipOpen, clipEnd);
     }
@@ -775,10 +787,13 @@ void BasePlayerActivity::onVideoPlayUrl(const bilibili::VideoUrlResult& result) 
         int64_t position = 0;
         APP_E->fire(VideoView::LAST_TIME, (void*)&(position));
         if (start > 0) {
-            std::string hint = fmt::format("已为您定位至: {}", wiliwili::sec2Time(start));
+            std::string hint = fmt::format("已为您定位至: {}", wiliwili::sec2Time((int64_t)start));
             APP_E->fire(VideoView::HINT, (void*)hint.c_str());
         }
     }
+
+    controlTargetMs = start > 0 ? (int64_t)(start * 1000.0 + 0.5) : 0;
+    this->video->setControlTargetMs(controlTargetMs);
 
     // D27: 在真正产生 loadfile 前，由 UI 侧设置权威内容标识。
     {

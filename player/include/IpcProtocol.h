@@ -347,6 +347,46 @@ static inline int sl_sync_context_consume(sl_sync_context_t *context,
     return 1;
 }
 
+/* 从 loadfile extra 读取 D28 控制提示。extra 与 D27 session kv 共用逗号
+ * 分隔；URL 中的逗号必须按引号忽略。返回 1 表示找到并解析成功。 */
+static inline int sl_extra_int64(const char *extra, const char *key,
+                                 int64_t *out) {
+    if (!extra || !key || !out)
+        return 0;
+    size_t keyLen = strlen(key);
+    char item[512];
+    size_t len = 0;
+    int inQuote = 0;
+    for (const char *p = extra;; ++p) {
+        char c = *p;
+        if (c == '"') {
+            inQuote = !inQuote;
+            continue;
+        }
+        if ((c == ',' && !inQuote) || c == '\0') {
+            item[len] = '\0';
+            if (len > keyLen && item[keyLen] == '=' &&
+                strncmp(item, key, keyLen) == 0) {
+                char *end = NULL;
+                errno = 0;
+                long long v = strtoll(item + keyLen + 1, &end, 10);
+                if (!errno && end && *end == '\0') {
+                    *out = (int64_t)v;
+                    return 1;
+                }
+                return 0;
+            }
+            if (c == '\0')
+                break;
+            len = 0;
+            continue;
+        }
+        if (len + 1 < sizeof(item))
+            item[len++] = c;
+    }
+    return 0;
+}
+
 /* ---- 命令（兼容层 -> daemon）---- */
 #define SL_CMD_OPEN     "open"     /* open<TAB>gen<TAB>req<TAB>videoUrl<TAB>referrer<TAB>start<TAB>end<TAB>audioUrl1... */
 #define SL_CMD_PAUSE    "pause"    /* pause<TAB>gen<TAB>req */

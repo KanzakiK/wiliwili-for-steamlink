@@ -52,22 +52,25 @@ public:
     ~VideoView() override;
 
     /// Video control
-    void setUrl(const std::string& url, int start = 0, int end = -1, const std::string& audio = "");
+    void setUrl(const std::string& url, double start = 0, int end = -1, const std::string& audio = "");
 
-    void setBackupUrl(const std::string& url, int start = 0, int end = -1, const std::string& audio = "");
+    void setBackupUrl(const std::string& url, double start = 0, int end = -1, const std::string& audio = "");
 
     // 多个音频文件添加多个音轨
-    void setUrl(const std::string& url, int start, int end, const std::vector<std::string>& audios);
+    void setUrl(const std::string& url, double start, int end, const std::vector<std::string>& audios);
 
     // 将视频添加入播放列表，按列表序播放 （用于自动播放备份视频）
-    void setBackupUrl(const std::string& url, int start, int end, const std::vector<std::string>& audios);
+    void setBackupUrl(const std::string& url, double start, int end, const std::vector<std::string>& audios);
 
     // 将多个视频合并成同一个视频播放
     void setUrl(const std::vector<EDLUrl>& edl_urls, int start = 0, int end = -1);
 
-    static std::string genExtraUrlParam(int start, int end, const std::string& audio);
+    /* S05：控制目标保留亚秒；整数 start 仅作为旧 daemon 兼容输入。 */
+    void setControlTargetMs(int64_t targetMs) { controlTargetMs = targetMs; }
 
-    static std::string genExtraUrlParam(int start, int end, const std::vector<std::string>& audios = {});
+    std::string genExtraUrlParam(double start, int end, const std::string& audio);
+
+    std::string genExtraUrlParam(double start, int end, const std::vector<std::string>& audios = {});
 
     void resume();
 
@@ -381,6 +384,7 @@ private:
     int real_duration          = 0;
     brls::Time hintLastShowTime    = 0;
     int64_t lastPlayedPosition = POSITION_UNDEFINED;
+    int64_t controlTargetMs = -1;
     VideoHighlightData highlightData;  // 在播放器进度条上显示的标记点（用来展示片头片尾标记）
 
     // 缩略图预览的显示状态

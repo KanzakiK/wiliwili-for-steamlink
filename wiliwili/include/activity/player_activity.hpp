@@ -160,6 +160,8 @@ private:
     std::string autoDowngradeNewSession;
     std::string autoDowngradeOldSession;
     uint64_t autoDowngradeRequestSeq = 0;
+    // S05：切清晰度/自动降级开始时冻结的控制目标，单位毫秒。
+    int64_t controlTargetMs = -1;
 };
 
 class PlayerActivity : public BasePlayerActivity {

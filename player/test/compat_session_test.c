@@ -75,6 +75,10 @@ static void send_event_frame(int fd, const char *name, const char *gen,
 static int validate_frames(char frames[][FRAME_CAP], int count) {
     int metas = 0;
     for (int i = 0; i < count; ++i) {
+        if (strncmp(frames[i], "seek\t", 5) == 0) {
+            fprintf(stderr, "FAIL: duplicate seek was sent at frame %d\n", i);
+            return 1;
+        }
         if (strncmp(frames[i], "meta\t", 5) != 0)
             continue;
         if (i + 1 >= count ||
@@ -109,7 +113,7 @@ static int validate_frames(char frames[][FRAME_CAP], int count) {
         } else if (metas == 1) {
             if (strstr(frames[i], "run=compat-probe") ||
                 !strstr(frames[i], "epoch=2") ||
-                !strstr(frames[i], "target_ms=5000")) {
+                !strstr(frames[i], "target_ms=5123")) {
                 fprintf(stderr, "FAIL: second meta must be sync-only\n");
                 return 1;
             }
@@ -256,9 +260,14 @@ int main(int argc, char **argv) {
     const char *args2[] = {
         "loadfile",
         "https://example.invalid/v2.m4s",
-        "replace", "start=5", NULL};
+        "replace", "start=5.123,target_ms=5123", NULL};
     if (mpv_command_async(ctx, 2, args2) < 0) return 1;
     usleep(300000);
+
+    /* open 已带同一目标：MPV_LOADED 后的等价 seek 必须被 compat 去重。 */
+    const char *dupSeek[] = {"seek", "5.123", "absolute", NULL};
+    if (mpv_command_async(ctx, 3, dupSeek) < 0) return 1;
+    usleep(100000);
 
     /* pause 建立新 epoch；假 daemon 回传 paused position_ms=6789；
      * resume 必须沿用同一个 epoch，不再创建新 epoch。 */

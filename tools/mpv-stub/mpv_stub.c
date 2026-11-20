@@ -284,10 +284,13 @@ static int send_cmd(mpv_handle *ctx, const char *cmd) {
  * 无 session 时仍发送 sync meta；正式启动路径行为不变。 */
 static int send_session_meta_and_open(mpv_handle *ctx, uint64_t gen, uint64_t req,
                                       const char *openCmd, const char *reason,
-                                      int64_t targetMs) {
+                                      int64_t targetMs, const char *desired) {
     if (!ctx || !openCmd) return MPV_ERROR_INVALID_PARAMETER;
     return send_meta_and_command(ctx, gen, req, reason ? reason : "open",
-                                 targetMs, SL_SYNC_DESIRED_PLAY, openCmd) == 0
+                                 targetMs,
+                                 desired && *desired ? desired
+                                                     : SL_SYNC_DESIRED_PLAY,
+                                 openCmd) == 0
                ? MPV_ERROR_SUCCESS
                : MPV_ERROR_GENERIC;
 }
@@ -1147,7 +1150,9 @@ static int recover_daemon_connection(mpv_handle *ctx) {
                     "replay open pos=%.3f pause=%d status=sent", pos, expPause);
             if (send_session_meta_and_open(ctx, replayGen, replayReq, openCmd,
                                            "watchdog_replay",
-                                           (int64_t)llround(pos * 1000.0)) !=
+                                           (int64_t)llround(pos * 1000.0),
+                                           expPause ? SL_SYNC_DESIRED_PAUSE
+                                                    : SL_SYNC_DESIRED_PLAY) !=
                 MPV_ERROR_SUCCESS)
                 d27_log(ctx, "COMPAT", replayGen, replayReq,
                         "replay open status=error");
@@ -1357,7 +1362,12 @@ static int try_failover(mpv_handle *ctx) {
     ctx->fileGeneration++;
     uint64_t failoverGen = ctx->fileGeneration;
     uint64_t failoverReq = ++ctx->requestSeq;
-    double failoverStart = open_cmd_start(cmd);
+    int expPause = ctx->expectedPause ? 1 : 0;
+    /* 故障时位置优先：heartbeat 的呈现位置比原始 open.start 更接近断点。 */
+    double failoverStart = ctx->hbValid ? ctx->hbPresentationMs / 1000.0
+                                        : ctx->resumePosition;
+    if (failoverStart <= 0.0)
+        failoverStart = open_cmd_start(cmd);
     ctx->hasLastOpen = 1;
     ctx->playbackActive = 1;
     ctx->resumePosition = failoverStart;
@@ -1376,12 +1386,16 @@ static int try_failover(mpv_handle *ctx) {
     clear_queued_events(ctx);
     reset_props_for_new_file(ctx, "");
     d27_log(ctx, "COMPAT", failoverGen, failoverReq,
-            "failover to backup gen=%llu req=%llu remaining=%d",
+            "failover to backup gen=%llu req=%llu remaining=%d "
+            "target_ms=%.0f source=%s",
             (unsigned long long)failoverGen, (unsigned long long)failoverReq,
-            ctx->backupCount);
+            ctx->backupCount, failoverStart * 1000.0,
+            ctx->hbValid ? "heartbeat" : "resume_position");
     send_session_meta_and_open(ctx, failoverGen, failoverReq, openCmd,
                                "failover",
-                               (int64_t)llround(failoverStart * 1000.0));
+                               (int64_t)llround(failoverStart * 1000.0),
+                               expPause ? SL_SYNC_DESIRED_PAUSE
+                                        : SL_SYNC_DESIRED_PLAY);
     return 1;
 }
 
@@ -1909,6 +1923,11 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
         sl_session_meta_t session;
         int hasSession = sl_session_meta_parse_extra(extra, &session) == 1;
         double openStart = 0.0;
+        int64_t targetMs = -1;
+        int64_t pausedHint = 0;
+        if (sl_extra_int64(extra, "target_ms", &targetMs) && targetMs >= 0)
+            openStart = (double)targetMs / 1000.0;
+        (void)sl_extra_int64(extra, "pause", &pausedHint);
         char buf[65000];
         build_open_cmd(url, method, extra, buf, sizeof(buf));
         pthread_mutex_lock(&ctx->daemonMutex);
@@ -1989,7 +2008,9 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
                 hasSession && session.cid[0] ? session.cid : "-",
                 hasSession && session.qn[0] ? session.qn : "-");
         return send_session_meta_and_open(ctx, openGen, openReq, frame, "open",
-                                          (int64_t)llround(openStart * 1000.0));
+                                          (int64_t)llround(openStart * 1000.0),
+                                          pausedHint ? SL_SYNC_DESIRED_PAUSE
+                                                     : SL_SYNC_DESIRED_PLAY);
     }
     if (strcmp(cmd, "set") == 0) {
         const char *prop = args[1] ? args[1] : "";
