@@ -60,6 +60,14 @@ int main() {
     CHECK(!sl::seekAckReady(true, false, 0));
     CHECK(!sl::seekAckReady(true, true, 960));
 
+    /* preroll 跳过量必须按 stereo S16 的 4 字节 PCM frame 对齐。 */
+    CHECK(sl::pcmSkipBytes(0.0, 48000) == 0);
+    CHECK(sl::pcmSkipBytes(138.0, 48000) == 26496);
+    CHECK(sl::pcmSkipBytes(4.3, 48000) % 4 == 0);
+    CHECK(sl::pcmSkipBytes(126.7, 48000) % 4 == 0);
+    CHECK(sl::pcmSkipBytes(597.31, 48000) % 4 == 0);
+    CHECK(sl::pcmSkipBytes(-1.0, 48000) == 0);
+
     std::printf("audio ack contract ok\n");
     return 0;
 }

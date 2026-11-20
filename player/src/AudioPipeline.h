@@ -12,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cmath>
 #include <deque>
 #include <mutex>
 #include <thread>
@@ -28,6 +29,15 @@ struct CSLAudioStream;
 namespace sl {
 
 class HttpSource;
+
+static inline std::size_t pcmSkipBytes(double skipMs, int sinkRate) {
+    if (skipMs <= 0.0 || sinkRate <= 0)
+        return 0;
+    double samples = skipMs * (double)sinkRate / 1000.0;
+    if (samples <= 0.0)
+        return 0;
+    return (std::size_t)std::llround(samples) * 2u * sizeof(int16_t);
+}
 
 enum class SeekStatus { None, Pending, Success, Failed, Stale };
 

@@ -505,7 +505,9 @@ void AudioPipeline::submit(const uint8_t* data, int size) {
         startedFlag_ = true;
 
         int rate = rate_.load();
-        size_t skipBytes = (size_t)(skipMs_.load() * rate * 4.0 / 1000.0);
+        /* preroll 是 stereo S16 PCM，必须以 4 字节 PCM frame 对齐；
+         * 否则会把 16-bit 采样错位，表现为白噪音。 */
+        size_t skipBytes = pcmSkipBytes(skipMs_.load(), rate);
         if (skipBytes > preroll_.size())
             skipBytes = preroll_.size();
         if (rate > 0) {
@@ -576,7 +578,7 @@ bool AudioPipeline::drainFrame() {
         std::size_t want = (std::size_t)frameBytes_;
         if (want > kPcmDumpLimitBytes - submitDumpBytes_)
             want = kPcmDumpLimitBytes - submitDumpBytes_;
-        std::fwrite(pending_.data(), 1, want, submitDump_);
+        std::fwrite(output, 1, want, submitDump_);
         submitDumpBytes_ += want;
     }
     SLAudio_SubmitFrame(stream_);
