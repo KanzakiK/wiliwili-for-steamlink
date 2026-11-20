@@ -24,6 +24,7 @@ namespace {
 
 constexpr int kFrameMs = 50;
 constexpr int kSinkRateHz = 48000; /* SLAudio.h: native frequency is 48000 Hz */
+constexpr std::size_t kPcmDumpLimitBytes = 8u * 1024u * 1024u;
 constexpr size_t kPrerollLimit = 2 * 1024 * 1024;
 constexpr int kPacketQueueMax = 96;
 constexpr size_t kPacketQueueBytes = 4 * 1024 * 1024;
@@ -124,6 +125,15 @@ bool AudioPipeline::start(CSLAudioContext* context, AVFormatContext* format,
     sl::d27Log("AUDIO", "format source=%dHz sink=%dHz channels=2 frame_bytes=%d frame_ms=%d",
                sourceRate, kSinkRateHz, frameBytes_, kFrameMs);
 
+    if (const char* dumpPath = std::getenv("SL_AUDIO_DUMP_PCM")) {
+        if (*dumpPath && !pcmDump_) {
+            pcmDump_ = std::fopen(dumpPath, "wb");
+            pcmDumpBytes_ = 0;
+            sl::d27Log("AUDIO", "pcm dump enabled path=%s limit=%u",
+                       dumpPath, (unsigned)kPcmDumpLimitBytes);
+        }
+    }
+
     thread_ = std::thread(&AudioPipeline::threadMain, this);
     if (stream_)
         sinkQueueSamples_.store(SLAudio_GetQueuedAudioSamples(stream_));
@@ -135,6 +145,12 @@ void AudioPipeline::stop() {
         abort_ = true;
         cond_.notify_all();
         thread_.join();
+    }
+    if (pcmDump_) {
+        std::fclose(pcmDump_);
+        pcmDump_ = nullptr;
+        sl::d27Log("AUDIO", "pcm dump closed bytes=%u",
+                   (unsigned)pcmDumpBytes_);
     }
 
     {
@@ -431,8 +447,16 @@ void AudioPipeline::handleFrame(AVFrame* frame) {
     uint8_t* output = pcm_.data();
     int converted = swr_convert(swr_, &output, maxOutput,
                                 (const uint8_t**)frame->data, frame->nb_samples);
-    if (converted > 0)
+    if (converted > 0) {
+        if (pcmDump_ && pcmDumpBytes_ < kPcmDumpLimitBytes) {
+            std::size_t want = (std::size_t)converted * 2 * sizeof(int16_t);
+            if (want > kPcmDumpLimitBytes - pcmDumpBytes_)
+                want = kPcmDumpLimitBytes - pcmDumpBytes_;
+            std::fwrite(pcm_.data(), 1, want, pcmDump_);
+            pcmDumpBytes_ += want;
+        }
         submit(pcm_.data(), converted * 2 * (int)sizeof(int16_t));
+    }
 }
 
 void AudioPipeline::submit(const uint8_t* data, int size) {

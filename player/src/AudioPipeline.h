@@ -11,6 +11,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <deque>
 #include <mutex>
 #include <thread>
@@ -140,6 +141,8 @@ private:
     int swrInputRate_ = 0;
     int swrInputFormat_ = 0;
     int swrInputChannels_ = 0;
+    std::FILE* pcmDump_ = nullptr;
+    std::size_t pcmDumpBytes_ = 0;
 
     std::atomic<int> rate_{0};
     int frameBytes_ = 0;

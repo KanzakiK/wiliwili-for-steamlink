@@ -26,6 +26,7 @@ HEALTH_FORCE=0
 HEALTH_WINDOW_MS=${HEALTH_WINDOW_MS:-}
 HEALTH_PROGRESS_MS=${HEALTH_PROGRESS_MS:-}
 HEALTH_NET_GRACE_MS=${HEALTH_NET_GRACE_MS:-}
+AUDIO_DUMP=0
 DEBUG_ARGS=()
 SCENE_ARGS=()
 WILI_FLAGS=()
@@ -50,6 +51,7 @@ while [ $# -gt 0 ]; do
         --health-window-ms) HEALTH_WINDOW_MS=${2:-}; shift 2 ;;
         --health-progress-ms) HEALTH_PROGRESS_MS=${2:-}; shift 2 ;;
         --health-net-grace-ms) HEALTH_NET_GRACE_MS=${2:-}; shift 2 ;;
+        --audio-dump) AUDIO_DUMP=1; shift ;;
         --diag|--sync-debug|--http-debug|--stop-debug|--diag-all)
             WILI_FLAGS+=("$1"); shift ;;
         -h|--help) usage ;;
@@ -79,6 +81,7 @@ SCP="sshpass -p $PASS scp -o StrictHostKeyChecking=no"
     echo "health_window_ms=${HEALTH_WINDOW_MS:-}"
     echo "health_progress_ms=${HEALTH_PROGRESS_MS:-}"
     echo "health_net_grace_ms=${HEALTH_NET_GRACE_MS:-}"
+    echo "audio_dump=$AUDIO_DUMP"
     echo "created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "host_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "device_time=$($SSH date 2>/dev/null || echo unavailable)"
@@ -124,9 +127,13 @@ fi
 if [ -n "$HEALTH_NET_GRACE_MS" ]; then
     health_export="$health_export SL_HEALTH_NET_GRACE_MS=\"$HEALTH_NET_GRACE_MS\""
 fi
+audio_dump_export=""
+if [ "$AUDIO_DUMP" = "1" ]; then
+    audio_dump_export=" SL_AUDIO_DUMP_PCM=/tmp/wiliwili-audio.pcm"
+fi
 
 cat > "$RUN_DIR/launch_cmdline.txt" <<EOF
-export http_proxy=; export https_proxy=; cd "/home/apps/wiliwili"; setup_app_home.sh "/home/apps/wiliwili/.home"; HOME="/home/apps/wiliwili/.home" SL_DEBUG_RUN_ID="$RUN_ID" SL_DEBUG_CONTENT="$CONTENT" SL_DEBUG_SCENE="$SCENE" SL_DEBUG_ARGS="$scene_args_joined"${offset_export}${health_export} /home/apps/wiliwili/wiliwili.sh$wili_flags_joined
+export http_proxy=; export https_proxy=; cd "/home/apps/wiliwili"; setup_app_home.sh "/home/apps/wiliwili/.home"; HOME="/home/apps/wiliwili/.home" SL_DEBUG_RUN_ID="$RUN_ID" SL_DEBUG_CONTENT="$CONTENT" SL_DEBUG_SCENE="$SCENE" SL_DEBUG_ARGS="$scene_args_joined"${offset_export}${health_export}${audio_dump_export} /home/apps/wiliwili/wiliwili.sh$wili_flags_joined
 EOF
 $SCP "$RUN_DIR/launch_cmdline.txt" "$DEVICE:/tmp/launch_cmdline.txt" >/dev/null 2>&1 || {
     echo "写入 launch_cmdline.txt 失败" >&2
@@ -140,6 +147,9 @@ collect() {
     $SSH "killall wiliwili >/dev/null 2>&1 || true" >/dev/null 2>&1 || true
     sleep 1
     $SCP "$DEVICE:/tmp/wiliwili.log" "$RUN_DIR/wiliwili.log" 2>/dev/null || true
+    if [ "$AUDIO_DUMP" = "1" ]; then
+        $SCP "$DEVICE:/tmp/wiliwili-audio.pcm" "$RUN_DIR/audio.pcm" 2>/dev/null || true
+    fi
     $SSH dmesg > "$RUN_DIR/dmesg.after.txt" 2>/dev/null || true
     echo "collected_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$RUN_DIR/manifest.txt"
     ARCHIVE_SIZE=$(du -sb "$RUN_DIR" 2>/dev/null | awk '{print $1}' || echo 0)
