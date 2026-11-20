@@ -28,7 +28,8 @@
 | IPC 范围 | 只走控制面与事件面；视频帧/PCM 仍走 SLVideo/SLAudio 硬件层 | 数据不过 IPC，性能损失可忽略 |
 | 脏退出检测 | Dirty Flag 锁文件 `/tmp/slplayer_vpu.lock`，不做开机 1 帧 H.264 探针 | 探针本身要 Create/Destroy stream，可能成为新污染源 |
 | watchdog 位置 | 独立线程放在 libmpv 兼容层（主进程侧），不放 SlPlayer | 监控者必须独立于被监控者；卡死的主循环无法自我检测 |
-| D22 软卡顿处理 | 只发一次播放页提示，不自动降清晰度、不重开播放 | 不同清晰度/片源压力不同，自动降级会误伤并打断当前 session；用户自行选择更稳妥 |
+| D22 软卡顿处理 | 只发一次播放页提示，不自动降清晰度、不重开播放 | 软卡顿的呈现推进极慢但仍在推进，可能由短暂负载造成；不在该路径上抢用户选择 |
+| D22 硬卡顿处理 | hard/no_frame 时提示一次，并在当前 session 自动降到 qn=64 | 真实复现显示 hard/no_frame 后 watchdog 重放同一高码率流仍会连续黑屏；自动降级只覆盖当前内容，不写用户设置 |
 | watchdog 形态 | 只读无锁 atomic 快照，不取播放线程锁、不调 stats()、不碰 VPU | 避免被播放线程阻塞；检测线程不能成为新的死锁点 |
 | 异常处理职责 | watchdog 只判定并触发上层恢复，不在 SlPlayer 内 `_exit()` | SlPlayer 是库，进程生命周期由上层管理 |
 | 父进程死亡清理 | `PR_SET_PDEATHSIG` + `getppid()` 复核 + IPC EOF 双保险 | PDEATHSIG 是父线程语义且 handler 中不能调 VPU/锁，必须用 EOF 兜底 |
@@ -88,7 +89,7 @@ Dirty Flag 语义：
 - 30 秒内最多自动重启 3 次，避免 fork 风暴。
 - 新 daemon 从启动到首帧期间挂起 watchdog，避免慢开流误判。
 
-### 4. 播放卡顿检测与提示
+### 4. 播放卡顿检测、提示与硬卡顿降级
 
 D22 与 watchdog 分层：
 
@@ -114,14 +115,21 @@ playing=true
 && 期间 videoFrames 仍在增长
 ```
 
-动作边界：
+软卡顿动作边界：
 
 - compat 发出一次性健康事件，reason 为 `soft` 或 `hard`，映射到播放页 `VideoView::HINT`。
-- 文案前半段区分原因、后半段统一：soft 为“播放不流畅，可尝试降低清晰度”；hard 为“播放卡顿，已尝试自动恢复，可尝试降低清晰度”。
+- 文案前半段区分原因、后半段统一：soft 为“播放不流畅，可尝试降低清晰度”；hard 为“播放卡顿，已尝试自动恢复，可尝试降低清晰度”。hard 自动降级成功时显示“播放卡顿，已自动降低清晰度”，避免双 Toast。
 - watchdog 恢复清队列时保留健康提示事件，防止 Toast 在交付前被丢弃。
 - 每个 generation 只提示一次；新文件、用户切清晰度或 watchdog 重启后重置。
 - 不调用 `updateVideoLink()`，不改 `SettingItem::VIDEO_QUALITY`，不自动重开当前播放。
 - 如果当前已是 720P 或没有低档，仍只提示一次，不做重复动作。
+
+硬卡顿自动降级边界：
+
+- 仅在 compat 判定的 `hard + no_frame` 路径触发；`no_heartbeat` 和 `worker_dead` 仍只走 watchdog 的进程恢复。
+- 当前 qn>64、且当前 `accept_quality` 包含 64 时，BasePlayerActivity 通过 `updateVideoLink()` 把当前内容切到 qn=64；每个内容只触发一次。
+- 覆盖只存在当前播放页实例：不写 `SettingItem::VIDEO_QUALITY`、不改静态 `defaultQuality`；换视频或用户手动选清晰度后立即清除。
+- watchdog 仍负责强杀并恢复 daemon；自动降级与新 open 的竞态由 generation 和 request id 串联，日志使用 `scene=auto_quality_downgrade reason=hard_stall` 记录 sent/ok、旧/新 session。
 
 ### 5. 父进程死亡清理
 
