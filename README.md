@@ -4,7 +4,7 @@
 
 这是一个把 [wiliwili](https://github.com/xfangfang/wiliwili) 的 UI/API 移植到 Steam Link 的实验性分支。它复用 wiliwili 的界面与 B 站业务层，但把播放内核替换为 Steam Link 原生 SLVideo/SLAudio，并在 wiliwili 与播放器之间加入 libmpv 兼容层和独立 IPC daemon。
 
-本分支不是 wiliwili 上游的正式发行版，也不引入 mpv 本体；它只在本仓库内通过构建期补丁替换播放相关胶水，不重写 UI、不修改 wiliwili 布局或样式。
+本分支不是 wiliwili 上游的正式发行版，也不引入 mpv 本体。正式修改已内源化到仓库源码，borealis 使用 `KanzakiK/borealis` 的 `steamlink-port` fork；构建不再应用现场 patch。本分支不重写 UI、不修改 wiliwili 布局或样式。
 
 ## 能力边界
 
@@ -78,7 +78,7 @@ DEVICE=root@<device-address> PASS=<device-password> sh tools/steamlink-app/insta
 
 - `player/`：SlPlayer、IPC daemon、音频管线和 HTTP 源。
 - `tools/mpv-stub/`：libmpv 兼容层。
-- `tools/patches/`：对 wiliwili/borealis 的构建期补丁。
+- `tools/cmake/`：Steam Link 交叉编译 CMake 工具链；`tools/patches/` 已清空，仅保留历史目录。
 - `tools/steamlink-app/`：安装、启动和真机测试脚本。
 - `docs/`：设计、任务看板、开发日志与排查经验。
 
@@ -87,7 +87,7 @@ DEVICE=root@<device-address> PASS=<device-password> sh tools/steamlink-app/insta
 
 本项目实际使用或参考的项目：
 
-- [wiliwili](https://github.com/xfangfang/wiliwili)：UI、API、borealis 界面框架与工程结构的主要来源；本仓库的构建补丁基于上游 `yoga` 分支。
+- [wiliwili](https://github.com/xfangfang/wiliwili)：UI、API、borealis 界面框架与工程结构的主要来源；本分支的 wiliwili 修改已内源化，borealis 修改位于 `KanzakiK/borealis` 的 `steamlink-port` fork。
 - Steam Link SDK：SLVideo / SLAudio 硬解与音频输出接口，是播放内核替换的基础；SDK 本身不随本仓库分发，只在构建环境中使用。
 - Kodi 的 Steam Link 解码器实现：用于核对 SLVideo 的 stream 创建/销毁、参数配置和 VPU 生命周期思路，属于实现参考。
 

@@ -4,7 +4,7 @@
 
 This is an experimental branch that ports the UI/API of [wiliwili](https://github.com/xfangfang/wiliwili) to Steam Link. It reuses wiliwili's interface and Bilibili business layer, but replaces the playback core with Steam Link's native SLVideo/SLAudio. A libmpv compatibility layer and a separate IPC daemon sit between wiliwili and the player.
 
-This branch is not an official release of upstream wiliwili and does not bundle mpv itself. It only replaces the playback glue through build-time patches in this repository; it does not rewrite the UI or modify wiliwili's layout or styles.
+This branch is not an official release of upstream wiliwili and does not bundle mpv itself. Its changes are internalized in the repository source; borealis uses the `steamlink-port` fork at `KanzakiK/borealis`, and the build no longer applies runtime patches. It does not rewrite the UI or modify wiliwili's layout or styles.
 
 ## Feature boundaries
 
@@ -78,7 +78,7 @@ For more commands, log locations, and troubleshooting, see [docs/04-构建与真
 
 - `player/`: SlPlayer, the IPC daemon, the audio pipeline, and the HTTP source.
 - `tools/mpv-stub/`: libmpv compatibility layer.
-- `tools/patches/`: build-time patches for wiliwili/borealis.
+- `tools/cmake/`: Steam Link cross-build CMake toolchain. `tools/patches/` is empty and kept only for historical reference.
 - `tools/steamlink-app/`: installation, startup, and real-device test scripts.
 - `docs/`: design, task board, development log, and troubleshooting notes.
 
@@ -86,7 +86,7 @@ For more commands, log locations, and troubleshooting, see [docs/04-构建与真
 
 Projects actually used or referenced by this branch:
 
-- [wiliwili](https://github.com/xfangfang/wiliwili): main source of the UI, API, borealis framework, and project structure; the build patches are based on the upstream `yoga` branch.
+- [wiliwili](https://github.com/xfangfang/wiliwili): main source of the UI, API, borealis framework, and project structure. This branch's wiliwili changes are internalized in the repository, and borealis changes live in the `steamlink-port` fork at `KanzakiK/borealis`.
 - Steam Link SDK: SLVideo/SLAudio hardware decode and audio output interfaces, the basis of the replaced playback core. The SDK itself is not distributed in this repository and is only used in the build environment.
 - Kodi's Steam Link decoder implementation: used to cross-check SLVideo stream creation/destruction, parameter setup, and VPU lifecycle ideas; an implementation reference only.
 

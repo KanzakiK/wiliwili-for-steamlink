@@ -29,7 +29,7 @@
 | 脏退出检测 | Dirty Flag 锁文件 `/tmp/slplayer_vpu.lock`，不做开机 1 帧 H.264 探针 | 探针本身要 Create/Destroy stream，可能成为新污染源 |
 | watchdog 位置 | 独立线程放在 libmpv 兼容层（主进程侧），不放 SlPlayer | 监控者必须独立于被监控者；卡死的主循环无法自我检测 |
 | D22 软卡顿处理 | 只发一次播放页提示，不自动降清晰度、不重开播放 | 软卡顿的呈现推进极慢但仍在推进，可能由短暂负载造成；不在该路径上抢用户选择 |
-| D22 硬卡顿处理 | 1080P 三档的 hard/no_frame 自动降到 qn=64；其它档只做 watchdog 恢复提示 | 真实复现显示 hard/no_frame 后 watchdog 重放同一高码率流仍会连续黑屏；只覆盖当前内容，不写用户设置，也不继续降 720P 以下 |
+| D22 硬卡顿处理 | 1080P 三档的 hard/no_frame 走 `hard_stall`，用户主动升档后新流首帧前直接 error 走 `quality_change_failure`；两者都自动降到 qn=64，其它档只做 watchdog 恢复提示 | 真实复现显示 hard/no_frame 后 watchdog 重放同一高码率流仍会连续黑屏；升档失败如果不接管，后续片源也可能受影响。只覆盖当前内容，不写用户设置，也不继续降 720P 以下 |
 | watchdog 形态 | 只读无锁 atomic 快照，不取播放线程锁、不调 stats()、不碰 VPU | 避免被播放线程阻塞；检测线程不能成为新的死锁点 |
 | 异常处理职责 | watchdog 只判定并触发上层恢复，不在 SlPlayer 内 `_exit()` | SlPlayer 是库，进程生命周期由上层管理 |
 | 父进程死亡清理 | `PR_SET_PDEATHSIG` + `getppid()` 复核 + IPC EOF 双保险 | PDEATHSIG 是父线程语义且 handler 中不能调 VPU/锁，必须用 EOF 兜底 |
@@ -131,7 +131,7 @@ playing=true
 - 仅在 compat 判定的 `hard + no_frame` 路径触发；`no_heartbeat` 和 `worker_dead` 仍只走 watchdog 的进程恢复。
 - 仅当前 qn 为 80/112/116、且当前 `accept_quality` 包含 64 时，BasePlayerActivity 通过 `updateVideoLink()` 把当前内容切到 qn=64；720P 及以下不再继续降，每个内容只触发一次。
 - 覆盖只存在当前播放页实例：不写 `SettingItem::VIDEO_QUALITY`、不改静态 `defaultQuality`；换视频或用户手动选清晰度后立即清除。
-- watchdog 仍负责 SIGKILL 并启动新 daemon，但自动降级时不再重放旧 qn 流：compat 等一个短 UI 决策窗口，若新 qn=64 loadfile 已到达或标记已置，则写 `watchdog replay cancelled` 并跳过 replay，避免旧流与新流交错 open。自动降级与新 open 的竞态仍由 generation 和 request id 串联，日志使用 `scene=auto_quality_downgrade reason=hard_stall` 记录 sent/ok/error、旧/新 session。`status=ok` 只在新流真实 `playback start` 后写；60 秒未起播或播放错误写 `status=error`，并回退通用硬提示。
+- watchdog 仍负责 SIGKILL 并启动新 daemon，但 `hard_stall` 自动降级时不再重放旧 qn 流：compat 等一个短 UI 决策窗口，若新 qn=64 loadfile 已到达或标记已置，则写 `watchdog replay cancelled` 并跳过 replay，避免旧流与新流交错 open。`quality_change_failure` 是新 qn 在首帧前直接 error，通常没有 watchdog replay 可取消；两条路径的自动降级与新 open 竞态都由 generation 和 request id 串联。日志使用 `scene=auto_quality_downgrade reason=hard_stall|quality_change_failure` 记录 sent/ok/error、旧/新 session。`status=ok` 只在新流真实 `playback start` 后写；60 秒未起播或播放错误写 `status=error`，并回退通用硬提示。
 
 ### 5. 父进程死亡清理
 

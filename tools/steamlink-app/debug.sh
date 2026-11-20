@@ -8,7 +8,7 @@
 # 用法：
 #   DEVICE=root@<ip> PASS=<password> sh tools/steamlink-app/debug.sh \
 #     --content video:BV1Nvx16TEzY --scene seek_forward \
-#     --arg target=120 --seconds 30 --sync-offset-ms 20 --diag --sync-debug
+#     --arg target_ms=120000 --seconds 30 --sync-offset-ms 25 --diag --sync-debug
 #     --health-force --health-window-ms 1000 --health-progress-ms 100000
 #
 # 注意：本脚本不改正式启动入口；wiliwili.sh 仍负责清空 /tmp/wiliwili.log。
