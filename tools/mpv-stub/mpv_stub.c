@@ -19,6 +19,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <stdint.h>
+#include <stdbool.h>
 #include <math.h>
 #include <errno.h>
 #include <unistd.h>
@@ -101,6 +102,14 @@ static int g_propDebug = 0;
 #define DAEMON_REAP_RECOVERY_MS 500
 #define DAEMON_REAP_TERMINATE_MS 5000
 
+static bool debugFaultEnabled(const char *name) {
+    const char *run = getenv("SL_DEBUG_RUN_ID");
+    if (!run || !*run)
+        return false;
+    const char *value = getenv(name);
+    return value && *value && strcmp(value, "0") != 0;
+}
+
 typedef struct {
     uint64_t epoch;
     uint64_t generation;
@@ -125,6 +134,8 @@ struct mpv_handle {
     int daemonGeneration;     /* 每次成功启动 daemon 递增，防止旧状态串到新实例 */
     int watchdogKilledGeneration;
     int suppressWatchdogReplay; /* D22: 自动降级已发起，取消本次 watchdog 旧流重放 */
+    uint64_t forcedFailoverGeneration;
+    int forcedWatchdogDone;
     long long restartTimes[DAEMON_RESTART_MAX];
     int restartCursor;
 
@@ -1247,32 +1258,51 @@ static void *watchdog_thread(void *arg) {
             int noHeartbeat = 0;
             int workerDead = 0;
             int stalled = 0;
+            int forcedWatchdog = 0;
             if (curGen == gen && pid > 0) {
                 noHeartbeat = hbAge > noHbMs;
                 workerDead = hbValid && !workerAlive;
                 stalled = frameAge > stallMs && playing && !inTransition &&
                           !expPause && resumeAge > graceMs;
-                if (noHeartbeat || workerDead || stalled) {
+                if (debugFaultEnabled("SL_DEBUG_FORCE_WATCHDOG") &&
+                    !ctx->forcedWatchdogDone && playing && !inTransition &&
+                    !expPause && resumeAge > 2000) {
+                    pthread_mutex_lock(&ctx->daemonMutex);
+                    if (!ctx->forcedWatchdogDone && ctx->daemonGeneration == gen &&
+                        ctx->daemonPid > 0 && !ctx->shuttingDown &&
+                        ctx->playbackActive) {
+                        ctx->forcedWatchdogDone = 1;
+                        forcedWatchdog = 1;
+                        d27_log(ctx, "COMPAT", (uint64_t)gen, hbRequestId,
+                                "debug fault force-watchdog at playback stable "
+                                "status=sent");
+                    }
+                    pthread_mutex_unlock(&ctx->daemonMutex);
+                }
+                if (noHeartbeat || workerDead || stalled || forcedWatchdog) {
                     pthread_mutex_lock(&ctx->daemonMutex);
                     if (ctx->daemonGeneration == gen && ctx->daemonPid > 0 &&
                         !ctx->shuttingDown && ctx->playbackActive) {
+                        const char* action = forcedWatchdog
+                                                 ? "forced_debug"
+                                                 : (noHeartbeat
+                                                        ? "no_heartbeat"
+                                                        : (workerDead
+                                                               ? "worker_dead"
+                                                               : "no_frame"));
                         d27_log(ctx, "COMPAT", (uint64_t)gen, hbRequestId,
                                 "watchdog stall pid=%d hb_age=%lldms frame_age=%lldms "
                                 "playing=%d transition=%d pause=%d worker_alive=%d "
                                 "bp=%d vq=%ums pos=%.1fms action=%s status=kill",
                                 pid, hbAge, frameAge, playing, inTransition,
                                 expPause, workerAlive, hbBackpressure, hbQueueMs,
-                                hbPresentationMs,
-                                noHeartbeat ? "no_heartbeat" :
-                                (workerDead ? "worker_dead" : "no_frame"));
+                                hbPresentationMs, action);
                         if (!ctx->healthHintShown) {
                             ctx->healthHintShown = 1;
                             d27_log(ctx, "COMPAT", (uint64_t)fileGen, hbRequestId,
                                     "health stall detected reason=hard "
                                     "frame_age=%lld action=%s -> hint shown",
-                                    (long long)frameAge,
-                                    noHeartbeat ? "no_heartbeat" :
-                                    (workerDead ? "worker_dead" : "no_frame"));
+                                    (long long)frameAge, action);
                             fire_health_hint(ctx, SL_HEALTH_HINT_HARD);
                         }
                         kill((pid_t)pid, SIGKILL);
@@ -1286,7 +1316,7 @@ static void *watchdog_thread(void *arg) {
             }
 
             /* D22：硬故障已由 watchdog 处理；软卡顿只提示一次，不动播放状态。 */
-            int hardAction = noHeartbeat || workerDead || stalled;
+            int hardAction = noHeartbeat || workerDead || stalled || forcedWatchdog;
             int healthEligible = !hardAction && curGen == gen && pid > 0 &&
                                  hbValid && hbHealthValid && workerAlive &&
                                  playing && !inTransition && !expPause &&
@@ -1479,6 +1509,26 @@ static void *rx_thread(void *arg) {
             pthread_mutex_unlock(&ctx->daemonMutex);
             if (restorePause) send_context_cmd(ctx, SL_CMD_PAUSE, "");
             d27_log(ctx, "EVT", evtGen, evtReq, "playback start status=ok");
+
+            if (debugFaultEnabled("SL_DEBUG_FORCE_FAILOVER")) {
+                pthread_mutex_lock(&ctx->daemonMutex);
+                int backupCount = ctx->backupCount;
+                int alreadyDone =
+                    ctx->forcedFailoverGeneration == (uint64_t)-1;
+                if (!alreadyDone && backupCount > 0)
+                    ctx->forcedFailoverGeneration = (uint64_t)-1;
+                pthread_mutex_unlock(&ctx->daemonMutex);
+                if (!alreadyDone && backupCount > 0) {
+                    d27_log(ctx, "COMPAT", evtGen, evtReq,
+                            "debug fault force-failover at playback start "
+                            "backup=%d status=sent", backupCount);
+                    if (try_failover(ctx))
+                        fire_wakeup(ctx);
+                } else if (!alreadyDone) {
+                    d27_log(ctx, "COMPAT", evtGen, evtReq,
+                            "debug fault force-failover skipped reason=no_backup");
+                }
+            }
         } else if (strcmp(evt, SL_EVT_PROGRESS) == 0) {
             double pos = nf >= 4 ? atof(fields[3]) : 0.0;
             double dur = nf >= 5 ? atof(fields[4]) : 0.0;
@@ -2145,10 +2195,13 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
          * 真机现象：视频不开始播放、进度停在 0（且会顺手关掉播放页透明）。 */
         pthread_mutex_lock(&ctx->txMutex);
         int dropped = ctx->backupCount;
-        ctx->backupCount = 0;
+        int kept = debugFaultEnabled("SL_DEBUG_FORCE_FAILOVER") && dropped > 0 ? 1 : 0;
+        ctx->backupCount = kept;
+        dropped -= kept;
         pthread_mutex_unlock(&ctx->txMutex);
         d27_log(ctx, "COMPAT", ctx->fileGeneration, ctx->lastCommandReq,
-                "playlist clear dropped=%d current playback continues", dropped);
+                "playlist clear dropped=%d kept=%d current playback continues",
+                dropped, kept);
         return MPV_ERROR_SUCCESS;
     }
     if (strcmp(cmd, "stop") == 0) {

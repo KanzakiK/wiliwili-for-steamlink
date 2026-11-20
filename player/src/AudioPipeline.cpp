@@ -22,6 +22,14 @@ extern "C" {
 namespace sl {
 namespace {
 
+static bool debugFaultEnabled(const char* name) {
+    const char* run = std::getenv("SL_DEBUG_RUN_ID");
+    if (!run || !*run)
+        return false;
+    const char* value = std::getenv(name);
+    return value && *value && std::strcmp(value, "0") != 0;
+}
+
 constexpr int kFrameMs = 50;
 constexpr int kSinkRateHz = 48000; /* SLAudio.h: native frequency is 48000 Hz */
 constexpr std::size_t kPcmDumpLimitBytes = 8u * 1024u * 1024u;
@@ -629,8 +637,14 @@ bool AudioPipeline::ensureStream() {
 
 bool AudioPipeline::seekInternal(double targetSeconds) {
     bool ok = true;
+    const bool forcedSeekFailure = debugFaultEnabled("SL_DEBUG_FAIL_AUDIO_SEEK");
 
-    if (selfDemux_ && format_) {
+    if (forcedSeekFailure) {
+        sl::d27Log("AUDIO", "debug fault audio-seek failed seq=%llu target=%.3f",
+                   (unsigned long long)ack_.sequence.load(), targetSeconds);
+    }
+
+    if (selfDemux_ && format_ && !forcedSeekFailure) {
         /* DASH 音轨由本线程解封装：HTTP Range 窗口提示必须在 av_seek_frame
          * 外围设置，不能再由播放线程在同步 seek 外层代劳。 */
         const bool hasSeekHint = source_ && source_->remote();
@@ -672,6 +686,18 @@ bool AudioPipeline::seekInternal(double targetSeconds) {
     if (stream_) {
         SLAudio_FreeStream(stream_);
         stream_ = nullptr;
+    }
+    if (forcedSeekFailure) {
+        sl::d27Log("AUDIO", "debug fault audio-seek aborted seq=%llu",
+                   (unsigned long long)ack_.sequence.load());
+        sinkQueueSamples_.store(0);
+        return false;
+    }
+    if (debugFaultEnabled("SL_DEBUG_FAIL_AUDIO_CREATE")) {
+        sl::d27Log("AUDIO", "debug fault audio-create failed seq=%llu",
+                   (unsigned long long)ack_.sequence.load());
+        sinkQueueSamples_.store(0);
+        return false;
     }
     if (!ensureStream()) {
         sl::d27Log("AUDIO", "seek stream recreate failed");

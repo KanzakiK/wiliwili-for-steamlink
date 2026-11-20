@@ -28,6 +28,11 @@ HEALTH_PROGRESS_MS=${HEALTH_PROGRESS_MS:-}
 HEALTH_NET_GRACE_MS=${HEALTH_NET_GRACE_MS:-}
 AUDIO_DUMP=0
 AUDIO_SUBMIT_DUMP=0
+NO_AUDIO=0
+FAIL_AUDIO_SEEK=0
+FAIL_AUDIO_CREATE=0
+FORCE_FAILOVER=0
+FORCE_WATCHDOG=0
 DEBUG_ARGS=()
 SCENE_ARGS=()
 WILI_FLAGS=()
@@ -54,6 +59,11 @@ while [ $# -gt 0 ]; do
         --health-net-grace-ms) HEALTH_NET_GRACE_MS=${2:-}; shift 2 ;;
         --audio-dump) AUDIO_DUMP=1; shift ;;
         --audio-submit-dump) AUDIO_SUBMIT_DUMP=1; shift ;;
+        --no-audio) NO_AUDIO=1; shift ;;
+        --fail-audio-seek) FAIL_AUDIO_SEEK=1; shift ;;
+        --fail-audio-create) FAIL_AUDIO_CREATE=1; shift ;;
+        --force-failover) FORCE_FAILOVER=1; shift ;;
+        --force-watchdog) FORCE_WATCHDOG=1; shift ;;
         --diag|--sync-debug|--http-debug|--stop-debug|--diag-all)
             WILI_FLAGS+=("$1"); shift ;;
         -h|--help) usage ;;
@@ -85,6 +95,11 @@ SCP="sshpass -p $PASS scp -o StrictHostKeyChecking=no"
     echo "health_net_grace_ms=${HEALTH_NET_GRACE_MS:-}"
     echo "audio_dump=$AUDIO_DUMP"
     echo "audio_submit_dump=$AUDIO_SUBMIT_DUMP"
+    echo "no_audio=$NO_AUDIO"
+    echo "fail_audio_seek=$FAIL_AUDIO_SEEK"
+    echo "fail_audio_create=$FAIL_AUDIO_CREATE"
+    echo "force_failover=$FORCE_FAILOVER"
+    echo "force_watchdog=$FORCE_WATCHDOG"
     echo "created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "host_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "device_time=$($SSH date 2>/dev/null || echo unavailable)"
@@ -137,9 +152,25 @@ fi
 if [ "$AUDIO_SUBMIT_DUMP" = "1" ]; then
     audio_export="$audio_export SL_AUDIO_SUBMIT_DUMP_PCM=/tmp/wiliwili-submit.pcm"
 fi
+fault_export=""
+if [ "$NO_AUDIO" = "1" ]; then
+    fault_export="$fault_export SL_DEBUG_NO_AUDIO=1"
+fi
+if [ "$FAIL_AUDIO_SEEK" = "1" ]; then
+    fault_export="$fault_export SL_DEBUG_FAIL_AUDIO_SEEK=1"
+fi
+if [ "$FAIL_AUDIO_CREATE" = "1" ]; then
+    fault_export="$fault_export SL_DEBUG_FAIL_AUDIO_CREATE=1"
+fi
+if [ "$FORCE_FAILOVER" = "1" ]; then
+    fault_export="$fault_export SL_DEBUG_FORCE_FAILOVER=1"
+fi
+if [ "$FORCE_WATCHDOG" = "1" ]; then
+    fault_export="$fault_export SL_DEBUG_FORCE_WATCHDOG=1"
+fi
 
 cat > "$RUN_DIR/launch_cmdline.txt" <<EOF
-export http_proxy=; export https_proxy=; cd "/home/apps/wiliwili"; setup_app_home.sh "/home/apps/wiliwili/.home"; HOME="/home/apps/wiliwili/.home" SL_DEBUG_RUN_ID="$RUN_ID" SL_DEBUG_CONTENT="$CONTENT" SL_DEBUG_SCENE="$SCENE" SL_DEBUG_ARGS="$scene_args_joined"${offset_export}${health_export}${audio_export} /home/apps/wiliwili/wiliwili.sh$wili_flags_joined
+export http_proxy=; export https_proxy=; cd "/home/apps/wiliwili"; setup_app_home.sh "/home/apps/wiliwili/.home"; HOME="/home/apps/wiliwili/.home" SL_DEBUG_RUN_ID="$RUN_ID" SL_DEBUG_CONTENT="$CONTENT" SL_DEBUG_SCENE="$SCENE" SL_DEBUG_ARGS="$scene_args_joined"${offset_export}${health_export}${audio_export}${fault_export} /home/apps/wiliwili/wiliwili.sh$wili_flags_joined
 EOF
 $SCP "$RUN_DIR/launch_cmdline.txt" "$DEVICE:/tmp/launch_cmdline.txt" >/dev/null 2>&1 || {
     echo "写入 launch_cmdline.txt 失败" >&2

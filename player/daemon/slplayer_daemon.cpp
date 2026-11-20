@@ -54,6 +54,14 @@ std::map<std::uint64_t, sl_session_meta_t> g_sessionMeta;
 std::mutex g_syncContextMutex;
 sl_sync_context_t g_pendingSync = {};
 
+static bool debugFaultEnabled(const char* name) {
+    const char* run = std::getenv("SL_DEBUG_RUN_ID");
+    if (!run || !*run)
+        return false;
+    const char* value = std::getenv(name);
+    return value && *value && std::strcmp(value, "0") != 0;
+}
+
 static const char* dash(const char* value) { return value && *value ? value : "-"; }
 
 static sl::DebugLogContext debugContextFromMeta(std::uint64_t gen,
@@ -578,6 +586,12 @@ int main(int argc, char** argv) {
             spec.endSeconds = atof(f[6].c_str());
             for (size_t i = 7; i < f.size(); ++i) {
                 if (!f[i].empty()) spec.audioUrls.push_back(f[i]);
+            }
+            if (debugFaultEnabled("SL_DEBUG_NO_AUDIO") && !spec.disableAudio) {
+                spec.disableAudio = true;
+                daemonLogReq(requestId,
+                             "debug fault no-audio injected, audio_urls=%zu",
+                             spec.audioUrls.size());
             }
             lastProgressMs.store(0);
             daemonLogReq(requestId, "open source audio=%zu", spec.audioUrls.size());

@@ -56,6 +56,15 @@ fi
 
 RUN_ID=$(sed -n 's/^run_id=//p' "$RUN_DIR/manifest.txt" 2>/dev/null | head -1)
 SCENE=$(sed -n 's/^scene=//p' "$RUN_DIR/manifest.txt" 2>/dev/null | head -1)
+FAIL_AUDIO_SEEK=$(sed -n 's/^fail_audio_seek=//p' "$RUN_DIR/manifest.txt" 2>/dev/null | head -1)
+FAIL_AUDIO_CREATE=$(sed -n 's/^fail_audio_create=//p' "$RUN_DIR/manifest.txt" 2>/dev/null | head -1)
+NO_AUDIO=$(sed -n 's/^no_audio=//p' "$RUN_DIR/manifest.txt" 2>/dev/null | head -1)
+FORCE_FAILOVER=$(sed -n 's/^force_failover=//p' "$RUN_DIR/manifest.txt" 2>/dev/null | head -1)
+FORCE_WATCHDOG=$(sed -n 's/^force_watchdog=//p' "$RUN_DIR/manifest.txt" 2>/dev/null | head -1)
+EXPECT_FAILURE=0
+if [ "$FAIL_AUDIO_SEEK" = "1" ] || [ "$FAIL_AUDIO_CREATE" = "1" ]; then
+    EXPECT_FAILURE=1
+fi
 if [ -z "$RUN_ID" ]; then
     fail "manifest 缺少 run_id"
 elif [ "$RUN_ID" != "$(basename "$RUN_DIR")" ]; then
@@ -73,13 +82,35 @@ for key in created_at collected_at archive_size_bytes; do
         fail "manifest 缺少 $key"
     fi
 done
+for key in no_audio fail_audio_seek fail_audio_create force_failover force_watchdog; do
+    if grep -q "^$key=" "$RUN_DIR/manifest.txt" 2>/dev/null; then
+        pass "manifest 含 $key"
+    else
+        pass "manifest 未设置 $key（历史 run 或无故障注入）"
+    fi
+done
 check_file "dmesg.$SCENE.start.txt"
-check_file "dmesg.$SCENE.ok.txt"
+if [ "$EXPECT_FAILURE" = "1" ]; then
+    pass "失败注入 run 不要求 dmesg.$SCENE.ok.txt"
+else
+    check_file "dmesg.$SCENE.ok.txt"
+fi
 
 check_pattern wiliwili.log "[boot] run=$RUN_ID" "boot run id"
 check_pattern wiliwili.log "][CMD][run=$RUN_ID][session=" "统一 CMD 行"
 check_both wiliwili.log "scene=$SCENE" "status=start" "CMD status=start"
-check_both wiliwili.log "scene=$SCENE" "status=ok" "CMD status=ok"
+if [ "$EXPECT_FAILURE" = "1" ]; then
+    if grep -F "status=error reason=playback_error" "$RUN_DIR/wiliwili.log" >/dev/null 2>&1; then
+        pass "失败注入 run 得到播放器 error 终态"
+    elif grep -F "scene=$SCENE" "$RUN_DIR/wiliwili.log" 2>/dev/null |
+         grep -E "status=timeout|status=error" >/dev/null 2>&1; then
+        pass "失败注入 run 得到场景失败终态"
+    else
+        fail "失败注入 run 缺少播放器 error 或场景 timeout/error 终态"
+    fi
+else
+    check_both wiliwili.log "scene=$SCENE" "status=ok" "CMD status=ok"
+fi
 
 if grep -Eq '^\[[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}\]\[[A-Z]+\]\[run=' \
         "$RUN_DIR/wiliwili.log"; then
@@ -94,7 +125,11 @@ else
     pass "统一日志无旧 source 前缀"
 fi
 
-SESSION=$(grep -F "scene=$SCENE status=ok" "$RUN_DIR/wiliwili.log" 2>/dev/null |
+SESSION_STATUS="status=ok"
+if [ "$EXPECT_FAILURE" = "1" ]; then
+    SESSION_STATUS="status=start"
+fi
+SESSION=$(grep -F "scene=$SCENE $SESSION_STATUS" "$RUN_DIR/wiliwili.log" 2>/dev/null |
     sed -n 's/.*\[session=\([^]]*\)\].*/\1/p' | grep -v '^-' | head -1)
 if [ -z "$SESSION" ]; then
     fail "场景没有有效 session"
@@ -412,6 +447,43 @@ else
             fail "seek 场景缺少毫秒目标"
         fi
     fi
+fi
+
+if [ "$NO_AUDIO" = "1" ]; then
+    check_pattern wiliwili.log "debug fault no-audio injected" "no-audio 故障注入"
+    check_pattern wiliwili.log "disabled by source spec, skip" "播放器跳过音频"
+    check_pattern wiliwili.log "no usable audio, silent playback" "silent 路径"
+    check_pattern wiliwili.log "SYNC_READY" "无音频仍完成准备屏障"
+fi
+if [ "$FAIL_AUDIO_SEEK" = "1" ] || [ "$FAIL_AUDIO_CREATE" = "1" ]; then
+    if [ "$FAIL_AUDIO_SEEK" = "1" ]; then
+        check_pattern wiliwili.log "debug fault audio-seek failed" "audio seek 故障注入"
+    else
+        check_pattern wiliwili.log "debug fault audio-create failed" "audio create 故障注入"
+    fi
+    if grep -E "seek done .* result=failed muted=1" "$RUN_DIR/wiliwili.log" >/dev/null 2>&1; then
+        pass "失败 ACK 保持 mute"
+    else
+        fail "失败 ACK 未保持 mute"
+    fi
+    check_pattern wiliwili.log "status=error reason=playback_error" "失败后 compat 写 error 终态"
+fi
+if [ "$FORCE_FAILOVER" = "1" ]; then
+    check_pattern wiliwili.log "debug fault force-failover at playback start" "failover 故障注入"
+    if grep -F "failover to backup gen=" "$RUN_DIR/wiliwili.log" |
+       grep -E "source=(heartbeat|resume_position|active_target)" >/dev/null 2>&1; then
+        pass "failover 使用故障时位置"
+    else
+        fail "failover 未使用故障时位置"
+    fi
+    check_pattern wiliwili.log "reason=failover" "failover 新 epoch"
+fi
+if [ "$FORCE_WATCHDOG" = "1" ]; then
+    check_pattern wiliwili.log "debug fault force-watchdog at playback stable" "watchdog 故障注入"
+    check_pattern wiliwili.log "action=forced_debug status=kill" "watchdog 强杀"
+    check_pattern wiliwili.log "status=error reason=watchdog" "旧 epoch error 终态"
+    check_pattern wiliwili.log "replay open pos=" "新 daemon replay"
+    check_pattern wiliwili.log "reason=watchdog_replay" "replay 新 epoch"
 fi
 
 if [ "$FAILURES" -eq 0 ]; then
