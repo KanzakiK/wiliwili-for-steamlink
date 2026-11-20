@@ -144,7 +144,9 @@ collect() {
 }
 trap collect EXIT INT TERM
 
-$SSH "killall shell >/dev/null 2>&1 || true" >/dev/null 2>&1 || true
+# 先结束旧播放进程，避免它继续持有 /tmp/wiliwili.log 的 fd；
+# 再重启 shell，由 shell.sh 读取刚写入的 launch_cmdline.txt。
+$SSH "killall wiliwili >/dev/null 2>&1 || true; sleep 1; killall shell >/dev/null 2>&1 || true" >/dev/null 2>&1 || true
 STARTED=1
 
 deadline=$(( $(date +%s) + 30 ))

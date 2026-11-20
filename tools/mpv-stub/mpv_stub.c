@@ -85,6 +85,10 @@ static int g_propDebug = 0;
 #define HEALTH_PROGRESS_MS_DEFAULT 250
 #define HEALTH_NET_GRACE_MS_DEFAULT 3000
 #define SL_HEALTH_PROP "sl-health-stall"
+/* 1=软卡顿（帧仍在提交，但呈现位置不推进），2=watchdog 硬卡顿。 */
+#define SL_HEALTH_HINT_SOFT 1
+#define SL_HEALTH_HINT_HARD 2
+#define SL_HEALTH_OBSERVER_ID 22
 #define DAEMON_RESTART_MAX 3
 #define DAEMON_RESTART_WINDOW_MS 30000
 /* 故障恢复可快速补杀；正常退出要给 daemon 完成 stop→FreeStream→FreeContext 的时间。 */
@@ -423,16 +427,29 @@ static void fire_wakeup(mpv_handle *ctx) {
     if (cb) cb(ud);
 }
 
-/* 新文件代次生效时丢弃上一文件尚未交付的 mpv 事件。
+/* 健康提示必须在 watchdog 恢复清队列时保留，否则刚发出的 Toast 会被丢弃。 */
+static int is_health_hint_event(mpv_event *e) {
+    if (!e || e->event_id != MPV_EVENT_PROPERTY_CHANGE || !e->data) return 0;
+    mpv_event_property *p = (mpv_event_property *)e->data;
+    return p->name && strcmp(p->name, SL_HEALTH_PROP) == 0;
+}
+
+/* 新文件代次生效时丢弃上一文件尚未交付的 mpv 事件，仅保留健康提示。
  * 不释放 lastReturned：UI 可能仍持有它的指针，按 mpv 语义由下一次 wait_event 释放。 */
 static void clear_queued_events(mpv_handle *ctx) {
+    mpv_event *health[EVT_QUEUE_MAX];
+    int healthCount = 0;
     pthread_mutex_lock(&ctx->qMutex);
     for (int i = 0; i < EVT_QUEUE_MAX; i++) {
-        free_event(ctx->queue[i]);
+        if (is_health_hint_event(ctx->queue[i]))
+            health[healthCount++] = ctx->queue[i];
+        else
+            free_event(ctx->queue[i]);
         ctx->queue[i] = NULL;
     }
     ctx->qHead = 0;
-    ctx->qCount = 0;
+    ctx->qCount = healthCount;
+    for (int i = 0; i < healthCount; i++) ctx->queue[i] = health[i];
     pthread_mutex_unlock(&ctx->qMutex);
 }
 
@@ -542,11 +559,11 @@ static void d27_log(mpv_handle *ctx, const char *source, uint64_t gen,
     fputc('\n', stderr);
 }
 
-/* D22：软卡顿只向 UI 发一次性提示，不触发 watchdog/透明层/END_FILE。 */
-static void fire_health_hint(mpv_handle *ctx) {
+/* 播放健康提示出口：软/硬卡顿共用，具体文案由 UI 根据 reason 选择。 */
+static void fire_health_hint(mpv_handle *ctx, int reason) {
     int *flag = malloc(sizeof(int));
     if (!flag) return;
-    *flag = 1;
+    *flag = reason;
     push_prop_event(ctx, SL_HEALTH_PROP, 0, MPV_FORMAT_FLAG, flag);
     fire_wakeup(ctx);
 }
@@ -949,6 +966,16 @@ static void *watchdog_thread(void *arg) {
                                 expPause, workerAlive,
                                 noHeartbeat ? "no_heartbeat" :
                                 (workerDead ? "worker_dead" : "no_frame"));
+                        if (!ctx->healthHintShown) {
+                            ctx->healthHintShown = 1;
+                            d27_log(ctx, "COMPAT", (uint64_t)fileGen, hbRequestId,
+                                    "health stall detected reason=hard "
+                                    "frame_age=%lld action=%s -> hint shown",
+                                    (long long)frameAge,
+                                    noHeartbeat ? "no_heartbeat" :
+                                    (workerDead ? "worker_dead" : "no_frame"));
+                            fire_health_hint(ctx, SL_HEALTH_HINT_HARD);
+                        }
                         kill((pid_t)pid, SIGKILL);
                         ctx->watchdogKilledGeneration = gen;
                     }
@@ -980,13 +1007,13 @@ static void *watchdog_thread(void *arg) {
                 } else if (!ctx->healthHintShown && hbVideoFrames > ctx->healthBaselineFrames &&
                            (now - ctx->healthBaselineMs >= healthWindowMs || healthForce)) {
                     d27_log(ctx, "COMPAT", (uint64_t)fileGen, hbRequestId,
-                            "health stall detected present=%.0f base=%.0f queue=%u "
+                            "health stall detected reason=soft present=%.0f base=%.0f queue=%u "
                             "frames=%d frame_age=%lld net_age=%lld force=%d -> hint shown",
                             hbPresentationMs, ctx->healthBaselinePresentationMs,
                             hbQueueMs, hbVideoFrames, frameAge,
                             hbNetErrorAgeMs, healthForce ? 1 : 0);
                     ctx->healthHintShown = 1;
-                    fire_health_hint(ctx);
+                    fire_health_hint(ctx, SL_HEALTH_HINT_SOFT);
                 }
             } else {
                 ctx->healthBaselineValid = 0;

@@ -238,9 +238,9 @@ fi
 HEALTH_FORCE=$(sed -n 's/^health_force=//p' "$RUN_DIR/manifest.txt" 2>/dev/null | head -1)
 if [ "$HEALTH_FORCE" = "1" ]; then
     check_pattern wiliwili.log "][COMPAT][run=$RUN_ID]" "compat 统一行"
-    check_pattern wiliwili.log "health stall detected" "compat 软卡顿检测"
-    check_pattern wiliwili.log "health hint shown" "播放页健康提示"
-    HEALTH_LINES=$(grep -c -F 'health stall detected' "$RUN_DIR/wiliwili.log" 2>/dev/null || true)
+    check_pattern wiliwili.log "health stall detected reason=soft" "compat 软卡顿检测"
+    check_pattern wiliwili.log "health hint shown reason=soft" "播放页软卡顿提示"
+    HEALTH_LINES=$(grep -c -F 'health stall detected reason=soft' "$RUN_DIR/wiliwili.log" 2>/dev/null || true)
     if [ "$HEALTH_LINES" -eq 1 ]; then
         pass "软卡顿提示每个 run 只发生一次"
     else
@@ -251,6 +251,13 @@ if [ "$HEALTH_FORCE" = "1" ]; then
     else
         pass "软卡顿提示未触发 watchdog/ERROR"
     fi
+fi
+
+if grep -F "watchdog stall" "$RUN_DIR/wiliwili.log" >/dev/null 2>&1; then
+    check_pattern wiliwili.log "health stall detected reason=hard" "compat 硬卡顿检测"
+    check_pattern wiliwili.log "health hint shown reason=hard" "播放页硬卡顿提示"
+else
+    pass "本 run 无 watchdog 硬卡顿"
 fi
 
 if [ "$FAILURES" -eq 0 ]; then

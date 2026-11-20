@@ -1153,8 +1153,12 @@ void MPVCore::eventMainLoop() {
                         break;
                     case 22:
                         if (data) {
-                            static const char* hint = "播放不流畅，可尝试切换到 720P";
-                            wiliwili::d27::log("UI", "health hint shown");
+                            int reason = *(int *)data;
+                            static const char* softHint = "播放不流畅，可尝试降低清晰度";
+                            static const char* hardHint = "播放卡顿，已尝试自动恢复，可尝试降低清晰度";
+                            const char* hint = reason == 2 ? hardHint : softHint;
+                            wiliwili::d27::log("UI", std::string("health hint shown reason=") +
+                                                           (reason == 2 ? "hard" : "soft"));
                             APP_E->fire("HINT", (void*)hint);
                         }
                         break;
