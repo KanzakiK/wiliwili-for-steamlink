@@ -107,6 +107,10 @@ public:
     double prerollMs() const;
     std::uint32_t sinkQueueSamples() const { return sinkQueueSamples_.load(); }
     uint32_t queuedSamples() const { return lastQueued_; }
+    bool decodeAllowed() const { return !paused_.load(); }
+    bool audibleOutputAllowed() const {
+        return decodeAllowed() && startAt_.load() > 0.0 && !ack_.isMuted();
+    }
     int queuedPackets() const;
 
 private:

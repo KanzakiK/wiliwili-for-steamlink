@@ -41,6 +41,7 @@ void *glad_glDeleteFramebuffers = NULL;
 extern void sl_d28_test_end_active_epoch(mpv_handle *ctx, const char *status,
                                          const char *reason);
 extern uint64_t sl_d28_test_active_epoch(mpv_handle *ctx);
+extern int64_t sl_d28_test_active_epoch_target(mpv_handle *ctx);
 #endif
 
 #define MAX_FRAMES 64
@@ -54,29 +55,47 @@ static int frame_ident(const char *frame, char *name, size_t nameCap,
     return sscanf(frame, fmt, name, gen, req) == 3 ? 0 : -1;
 }
 
+static void send_event_frame(int fd, const char *name, const char *gen,
+                             const char *req, const char *args) {
+    char payload[256];
+    int n = snprintf(payload, sizeof(payload), "%s\t%s\t%s\t%s", name, gen, req,
+                     args);
+    if (n <= 0 || (size_t)n >= sizeof(payload))
+        return;
+    unsigned char h[SL_IPC_HEADER_SIZE];
+    uint32_t len = (uint32_t)n;
+    h[0] = len & 0xff;
+    h[1] = (len >> 8) & 0xff;
+    h[2] = (len >> 16) & 0xff;
+    h[3] = (len >> 24) & 0xff;
+    if (send(fd, h, sizeof(h), MSG_NOSIGNAL) == (ssize_t)sizeof(h))
+        (void)send(fd, payload, (size_t)n, MSG_NOSIGNAL);
+}
+
 static int validate_frames(char frames[][FRAME_CAP], int count) {
     int metas = 0;
     for (int i = 0; i < count; ++i) {
         if (strncmp(frames[i], "meta\t", 5) != 0)
             continue;
-        if (i + 1 >= count || strncmp(frames[i + 1], "open\t", 5) != 0) {
-            fprintf(stderr, "FAIL: meta frame %d is not followed by open\n", i);
+        if (i + 1 >= count ||
+            (strncmp(frames[i + 1], "open\t", 5) != 0 &&
+             strncmp(frames[i + 1], "pause\t", 6) != 0 &&
+             strncmp(frames[i + 1], "resume\t", 7) != 0)) {
+            fprintf(stderr, "FAIL: meta frame %d is not followed by a sync command\n", i);
             return 1;
         }
         char name[32], gen[32], req[32];
-        char openName[32], openGen[32], openReq[32];
+        char cmdName[32], cmdGen[32], cmdReq[32];
         if (frame_ident(frames[i], name, sizeof(name), gen, sizeof(gen), req,
                         sizeof(req)) < 0 ||
-            frame_ident(frames[i + 1], openName, sizeof(openName), openGen,
-                        sizeof(openGen), openReq, sizeof(openReq)) < 0 ||
-            strcmp(gen, openGen) != 0 || strcmp(req, openReq) != 0) {
-            fprintf(stderr, "FAIL: meta/open identity mismatch at frame %d\n", i);
+            frame_ident(frames[i + 1], cmdName, sizeof(cmdName), cmdGen,
+                        sizeof(cmdGen), cmdReq, sizeof(cmdReq)) < 0 ||
+            strcmp(gen, cmdGen) != 0 || strcmp(req, cmdReq) != 0) {
+            fprintf(stderr, "FAIL: meta/command identity mismatch at frame %d\n", i);
             return 1;
         }
         if (!strstr(frames[i], "epoch=") ||
-            !strstr(frames[i], "target_ms=") ||
-            !strstr(frames[i], "reason=open") ||
-            !strstr(frames[i], "desired=play")) {
+            !strstr(frames[i], "target_ms=")) {
             fprintf(stderr, "FAIL: meta frame %d lacks sync fields\n", i);
             return 1;
         }
@@ -94,14 +113,32 @@ static int validate_frames(char frames[][FRAME_CAP], int count) {
                 fprintf(stderr, "FAIL: second meta must be sync-only\n");
                 return 1;
             }
+        } else if (metas == 2) {
+            if (!strstr(frames[i], "epoch=3") ||
+                !strstr(frames[i], "target_ms=-1") ||
+                !strstr(frames[i], "reason=pause_resume") ||
+                !strstr(frames[i], "desired=pause") ||
+                strcmp(cmdName, SL_CMD_PAUSE) != 0) {
+                fprintf(stderr, "FAIL: pause meta contract\n");
+                return 1;
+            }
+        } else if (metas == 3) {
+            if (!strstr(frames[i], "epoch=3") ||
+                !strstr(frames[i], "target_ms=6789") ||
+                !strstr(frames[i], "reason=pause_resume") ||
+                !strstr(frames[i], "desired=play") ||
+                strcmp(cmdName, SL_CMD_RESUME) != 0) {
+                fprintf(stderr, "FAIL: resume meta must reuse pause epoch\n");
+                return 1;
+            }
         }
         ++metas;
     }
-    if (metas != 2) {
-        fprintf(stderr, "FAIL: expected 2 meta frames, got %d\n", metas);
+    if (metas != 4) {
+        fprintf(stderr, "FAIL: expected 4 meta frames, got %d\n", metas);
         return 1;
     }
-    printf("D28_COMPAT frames=%d metas=%d adjacency=ok sync_only=ok\n", count,
+    printf("D28_COMPAT frames=%d metas=%d adjacency=ok pause_resume=ok\n", count,
            metas);
     return 0;
 }
@@ -109,6 +146,7 @@ static int validate_frames(char frames[][FRAME_CAP], int count) {
 static int fake_daemon(const char *path) {
     static char frames[MAX_FRAMES][FRAME_CAP];
     int frameCount = 0;
+    int sentPaused = 0;
     unlink(path);
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) return 1;
@@ -154,6 +192,15 @@ static int fake_daemon(const char *path) {
             snprintf(frames[frameCount], sizeof(frames[frameCount]), "%s",
                      payload);
             ++frameCount;
+        }
+        if (!sentPaused && strncmp(payload, SL_CMD_PAUSE, 5) == 0 &&
+            strncmp(payload, "pause\t", 6) == 0) {
+            char name[32], gen[32], req[32];
+            if (frame_ident(payload, name, sizeof(name), gen, sizeof(gen), req,
+                            sizeof(req)) == 0) {
+                send_event_frame(client, SL_EVT_PAUSED, gen, req, "6789");
+                sentPaused = 1;
+            }
         }
         if (strncmp(payload, SL_CMD_QUIT, strlen(SL_CMD_QUIT)) == 0)
             break;
@@ -213,12 +260,22 @@ int main(int argc, char **argv) {
     if (mpv_command_async(ctx, 2, args2) < 0) return 1;
     usleep(300000);
 
+    /* pause 建立新 epoch；假 daemon 回传 paused position_ms=6789；
+     * resume 必须沿用同一个 epoch，不再创建新 epoch。 */
+    const char *pauseArgs[] = {"set", "pause", "yes", NULL};
+    if (mpv_command_async(ctx, 3, pauseArgs) < 0) return 1;
+    usleep(300000);
+    const char *resumeArgs[] = {"set", "pause", "no", NULL};
+    if (mpv_command_async(ctx, 4, resumeArgs) < 0) return 1;
+    usleep(300000);
+
 #ifdef SL_D28_TEST_HOOKS
-    CHECK(sl_d28_test_active_epoch(ctx) == 2);
+    CHECK(sl_d28_test_active_epoch(ctx) == 3);
+    CHECK(sl_d28_test_active_epoch_target(ctx) == 6789);
     sl_d28_test_end_active_epoch(ctx, "error", "watchdog");
     sl_d28_test_end_active_epoch(ctx, "error", "watchdog");
     CHECK(sl_d28_test_active_epoch(ctx) == 0);
-    printf("D28_EPOCH error_terminal=1 idempotent=1\n");
+    printf("D28_EPOCH error_terminal=1 idempotent=1 target_finalized=1\n");
 #endif
     mpv_terminate_destroy(ctx);
     return 0;

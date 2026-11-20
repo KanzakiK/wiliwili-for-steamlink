@@ -25,6 +25,7 @@
 #include <pthread.h>
 
 #include <atomic>
+#include <cmath>
 #include <chrono>
 #include <cstdarg>
 #include <cstdint>
@@ -420,8 +421,15 @@ int main(int argc, char** argv) {
             break;
         }
         case sl::EventType::Paused:
-            emitContext(SL_EVT_PAUSED, ev.requestId);
-            sl::d27LogReq("EVT", ev.requestId, "paused status=ok");
+            {
+                char args[64];
+                std::snprintf(args, sizeof(args), "%lld",
+                              (long long)std::llround(ev.position * 1000.0));
+                emitContext(SL_EVT_PAUSED, ev.requestId, args);
+                sl::d27LogReq("EVT", ev.requestId,
+                              "paused position_ms=%lld status=ok",
+                              (long long)std::llround(ev.position * 1000.0));
+            }
             break;
         case sl::EventType::Resumed:
             emitContext(SL_EVT_RESUMED, ev.requestId);

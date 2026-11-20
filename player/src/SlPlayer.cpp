@@ -233,6 +233,10 @@ struct Player::Impl {
         syncState_.begin(spec.sync.epoch, spec.sync.requestId,
                          spec.sync.desiredPlay);
         pendingAudioSeq_.store(0);
+        pauseTargetMs_.store(spec.sync.targetMs >= 0
+                                 ? (double)spec.sync.targetMs
+                                 : spec.startSeconds * 1000.0);
+        pausePending_.store(false);
         lastTimelineRequestId_.store(spec.sync.requestId);
         stop_ = false;
         paused_ = false;
@@ -318,6 +322,7 @@ struct Player::Impl {
         syncState_.begin(sync.epoch ? sync.epoch : syncState_.epoch.load(),
                          requestId, !value);
         pendingAudioSeq_.store(0);
+        pausePending_.store(false);
         lastTimelineRequestId_.store(requestId);
         bool previous = targetPaused_.exchange(value);
         if (value)
@@ -329,11 +334,12 @@ struct Player::Impl {
 
         if (value) {
             /* SLVideo 队列里还有 ~2.4s 画面，必须由播放线程清空才能立即暂停 */
+            pauseTargetMs_.store(position_.load() * 1000.0);
             pauseFlush_ = true;
         } else {
             /* 音频要等视频首帧重建并对齐后再恢复，避免声音先跑出去。 */
             if (paused_.load()) {
-                resumeTarget_.store(position_.load());
+                resumeTarget_.store(pauseTargetMs_.load() / 1000.0);
                 resumeSeek_ = true;
                 resumeInProgress_ = true;
             }
@@ -352,6 +358,7 @@ struct Player::Impl {
         syncState_.begin(sync.epoch ? sync.epoch : syncState_.epoch.load(),
                          requestId, sync.desiredPlay);
         pendingAudioSeq_.store(0);
+        pausePending_.store(false);
         lastTimelineRequestId_.store(requestId);
         if (seconds < 0.0)
             seconds = 0.0;
@@ -434,6 +441,12 @@ struct Player::Impl {
 
     void emit(EventType type, std::string message = std::string(),
               std::uint64_t requestId = 0) {
+        emitWithPosition(type, position_.load(), std::move(message), requestId);
+    }
+
+    void emitWithPosition(EventType type, double position,
+                          std::string message = std::string(),
+                          std::uint64_t requestId = 0) {
         EventCallback cb;
         {
             std::lock_guard<std::mutex> lock(mutex);
@@ -444,7 +457,7 @@ struct Player::Impl {
 
         Event event;
         event.type = type;
-        event.position = position_.load();
+        event.position = position;
         event.duration = duration_.load();
         event.requestId = requestId;
         event.message = std::move(message);
@@ -519,6 +532,8 @@ struct Player::Impl {
     SyncStateTracker syncState_;
     std::atomic<std::uint64_t> pendingAudioSeq_{0};
     std::atomic<std::uint64_t> lastTimelineRequestId_{0};
+    std::atomic<double> pauseTargetMs_{0.0};
+    std::atomic<bool> pausePending_{false};
     std::atomic<double> resumeTarget_{0.0};
     std::atomic<double> pendingSeek_{-1.0};
     std::atomic<std::uint64_t> pendingSeekId_{0};
@@ -1101,7 +1116,8 @@ void Player::Impl::run() {
                   queuedNow);
     };
 
-    auto doAudioPrepare = [&](double target, std::uint64_t requestId) -> std::uint64_t {
+    auto doAudioPrepare = [&](double target, std::uint64_t requestId,
+                              bool forPlay) -> std::uint64_t {
         syncState_.clearReady(kSyncReadyAudio);
         if (!audioReady) {
             syncState_.setReady(kSyncReadyAudio);
@@ -1113,7 +1129,10 @@ void Player::Impl::run() {
         pendingAudioSeq_.store(seq);
         audioResetReady = false;
         audioSeekFailed = false;
-        audio_.setPaused(false);
+        /* decodeAllowed 与 audibleOutputAllowed 分离：PAUSE 也允许 reset/seek，
+         * 但只有 PLAY 才恢复解码；两者都不调用 scheduleStart 前不会出声。 */
+        if (forPlay)
+            audio_.setPaused(false);
         sl::d27LogReq("AUDIO", requestId, "prepare queued seq=%llu target=%.3f",
                       (unsigned long long)seq, target);
         return seq;
@@ -1138,7 +1157,7 @@ void Player::Impl::run() {
         syncReadyLogged = false;
         syncStartLogged = false;
         bool ok = doVideoPrepare(target, requestId, rebuildVideo);
-        std::uint64_t audioSeq = doAudioPrepare(requestedTarget, requestId);
+        std::uint64_t audioSeq = doAudioPrepare(requestedTarget, requestId, true);
 
         audioBaseMs = requestedTarget * 1000.0;
         seekDisplayTargetMs = requestedTarget * 1000.0;
@@ -1201,6 +1220,29 @@ void Player::Impl::run() {
                 return;
             }
         }
+        if (pausePending_.load() && audioResetReady &&
+            pendingAudioSeq_.load() == 0 &&
+            (!audioReady || audio_.sinkQueueSamples() == 0) &&
+            syncState_.has(kSyncReadyVideo)) {
+            double at = pauseTargetMs_.load() / 1000.0;
+            pausePending_.store(false);
+            syncState_.setReady(kSyncReadyAudio);
+            syncState_.phase.store(static_cast<int>(SyncPhase::Paused));
+            if (!syncReadyLogged.load()) {
+                syncReadyLogged = true;
+                syncEvent(spec, syncState_.epoch.load(),
+                          pauseRequestId_.load(), "SYNC_READY",
+                          "ready_mask=%u phase=paused target_ms=%.0f "
+                          "sink_queued=%u decode_allowed=%d audible=%d",
+                          syncState_.readyMask.load(), at * 1000.0,
+                          audio_.sinkQueueSamples(),
+                          audio_.decodeAllowed() ? 1 : 0,
+                          audio_.audibleOutputAllowed() ? 1 : 0);
+            }
+            emitWithPosition(EventType::Paused, at, std::string(),
+                             pauseRequestId_.load());
+            pauseRequestId_.store(0);
+        }
         if (playDiag) {
             auto diagNow = std::chrono::steady_clock::now();
             if (diagNow - lastDiag >= std::chrono::seconds(1)) {
@@ -1226,8 +1268,8 @@ void Player::Impl::run() {
             prepareEpoch = syncState_.epoch.load();
             syncReadyLogged = false;
             syncStartLogged = false;
-            /* 丢弃 SLVideo 里已排队但还没上屏的画面，暂停点取当前呈现位置 */
-            double at = position_.load();
+            /* 暂停点在命令入口冻结，不用播放线程稍后读到的推进位置。 */
+            double at = pauseTargetMs_.load() / 1000.0;
             if (!rebuildStream()) {
                 emitFatal(FatalType::VpuRebuildFailed, "暂停时重建 SLVideo stream 失败");
                 fail("暂停时重建 SLVideo stream 失败");
@@ -1250,23 +1292,16 @@ void Player::Impl::run() {
             pauseFlushed_ = true;
             /* 与 Kodi FlushBuffers 一致：视频队列清空后才停音频。 */
             audio_.setPaused(true);
+            /* pause 需要 reset/stream/SDK queue ACK，但不需要 preroll。 */
+            doAudioPrepare(at, pauseRequestId_.load(), false);
             sl::d27Log("PLAYER", "pause flush video queue at=%.2f", at);
             resumeInProgress_ = false;
             backpressure_ = false;
             if (targetPaused_.load()) {
                 paused_ = true;
                 syncState_.setReady(kSyncReadyVideo);
-                syncState_.setReady(kSyncReadyAudio);
-                syncState_.phase.store(static_cast<int>(SyncPhase::Paused));
-                if (!syncReadyLogged.load()) {
-                    syncReadyLogged = true;
-                    syncEvent(spec, syncState_.epoch.load(),
-                              lastTimelineRequestId_.load(), "SYNC_READY",
-                              "ready_mask=%u phase=paused target_ms=%.0f",
-                              syncState_.readyMask.load(), at * 1000.0);
-                }
-                emit(EventType::Paused, std::string(), pauseRequestId_.load());
-                pauseRequestId_ = 0;
+                pausePending_.store(true);
+                /* SYNC_READY/SL_EVT_PAUSED 等音频 ACK 在上面统一发出。 */
             } else {
                 /* pause/resume 在 flush 期间连续到达：以最新目标为准，直接补恢复。 */
                 resumeTarget_ = at;
@@ -1292,8 +1327,41 @@ void Player::Impl::run() {
                 pendingResumeEvent = true;
             }
             resumeRequestId_ = 0;
-            /* 暂停 flush 已经重建并清空过视频队列，恢复时只重新定位 demuxer。 */
-            doSeek(resumeTarget_.load(), 0, false);
+            /* resume 沿用 pause epoch：只恢复视频读取和音频解码/预缓冲，
+             * 不调用 doAudioPrepare，所以 seekSequence 不增加。 */
+            double at = resumeTarget_.load();
+            pausePending_.store(false);
+            if (!doVideoPrepare(at, resumeRequestId, false)) {
+                fail("resume video prepare failed");
+                return;
+            }
+            audio_.setPaused(false); /* decodeAllowed=true，尚未 scheduleStart */
+            pendingAudioSeq_.store(0);
+            audioResetReady = true;
+            audioSeekFailed = false;
+            videoStarted = false;
+            afterSeek = true;
+            audioScheduled = false;
+            audioPendingPosition = false;
+            audioStartPositionMs = 0.0;
+            syncWatchActive = false;
+            syncPostStartLogged = false;
+            syncStartWallMs = 0;
+            syncStartSkipMs = 0.0;
+            queueMax = 0;
+            queueFlatFrames = 0;
+            maxSubmittedMs = at * 1000.0;
+            videoClock = at;
+            position_ = at;
+            nextDeadline = std::chrono::steady_clock::now();
+            seeking_ = false;
+            syncEvent(spec, syncState_.epoch.load(), resumeRequestId,
+                      "SYNC_START_PREPARE",
+                      "target_ms=%.0f epoch_reused=%d decode_allowed=%d "
+                      "audible=%d",
+                      at * 1000.0, syncState_.epoch.load() != 0 ? 1 : 0,
+                      audio_.decodeAllowed() ? 1 : 0,
+                      audio_.audibleOutputAllowed() ? 1 : 0);
             /* 允许播放线程提交恢复后的首帧；Resumed 事件仍等首帧完成再发。 */
             if (pendingResumeEvent)
                 paused_ = false;

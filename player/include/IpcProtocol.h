@@ -361,7 +361,7 @@ static inline int sl_sync_context_consume(sl_sync_context_t *context,
 #define SL_EVT_OPENED         "opened"          /* opened<TAB>gen<TAB>req<TAB>duration<TAB>width<TAB>height */
 #define SL_EVT_PLAYBACK_START "playback_start"  /* playback_start<TAB>gen<TAB>req */
 #define SL_EVT_PROGRESS       "progress"        /* progress<TAB>gen<TAB>req<TAB>position<TAB>duration */
-#define SL_EVT_PAUSED         "paused"          /* paused<TAB>gen<TAB>req */
+#define SL_EVT_PAUSED         "paused"          /* paused<TAB>gen<TAB>req<TAB>position_ms */
 #define SL_EVT_RESUMED        "resumed"         /* resumed<TAB>gen<TAB>req */
 #define SL_EVT_SEEKED         "seeked"          /* seeked<TAB>gen<TAB>req<TAB>position */
 #define SL_EVT_EOF            "eof"             /* eof<TAB>gen<TAB>req */
