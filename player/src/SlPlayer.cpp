@@ -352,7 +352,7 @@ struct Player::Impl {
             pauseFlush_ = true;
         } else {
             /* 音频要等视频首帧重建并对齐后再恢复，避免声音先跑出去。 */
-            if (paused_.load()) {
+            if (paused_.load() || pauseFlush_.load() || pausePending_.load()) {
                 resumeTarget_.store(pauseTargetMs_.load() / 1000.0);
                 resumeSeek_ = true;
                 resumeInProgress_ = true;

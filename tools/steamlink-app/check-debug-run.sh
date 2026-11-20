@@ -138,7 +138,7 @@ else
     PREFIX="[run=$RUN_ID][session=$SESSION]"
 
     case "$SCENE" in
-        play|seek_forward|seek_backward|pause_resume|pause_seek|quality_change|pause_quality|continuous_seek)
+        play|seek_forward|seek_backward|pause_resume|pause_repeat|pause_race|pause_long|pause_seek|quality_change|pause_quality|continuous_seek)
             check_pattern wiliwili.log "][UI]$PREFIX" "UI 统一行"
             check_pattern wiliwili.log "][UI]$PREFIX[gen=-][req=-] content start" "UI content start"
             check_pattern wiliwili.log "][COMPAT]$PREFIX" "compat 统一行"
@@ -260,6 +260,31 @@ else
                     check_both wiliwili.log "$PREFIX" "set pause=" "CMD pause/resume"
                     check_both wiliwili.log "$PREFIX" "paused" "EVT paused"
                     check_both wiliwili.log "$PREFIX" "resumed" "EVT resumed"
+                    ;;
+                pause_repeat)
+                    check_both wiliwili.log "$PREFIX" "scene=$SCENE mode=second_pause" "second pause sent"
+                    check_both wiliwili.log "$PREFIX" "set pause=yes status=duplicate" "重复 pause 幂等"
+                    check_both wiliwili.log "$PREFIX" "paused status=ok" "EVT paused"
+                    check_both wiliwili.log "$PREFIX" "resumed status=ok" "EVT resumed"
+                    ;;
+                pause_race)
+                    check_both wiliwili.log "$PREFIX" "scene=$SCENE mode=pause_resume_no_wait" "pause/resume 竞态 sent"
+                    check_both wiliwili.log "$PREFIX" "set pause=yes status=sent" "CMD pause"
+                    check_both wiliwili.log "$PREFIX" "set pause=no status=sent" "CMD resume"
+                    check_both wiliwili.log "$PREFIX" "SYNC_START_PREPARE" "竞态后恢复准备"
+                    check_both wiliwili.log "$PREFIX" "epoch_reused=1" "竞态后复用 epoch"
+                    check_both wiliwili.log "$PREFIX" "SYNC_READY" "竞态后重新准备完成"
+                    check_both wiliwili.log "$PREFIX" "SYNC_START epoch=" "竞态后 PLAY 启动"
+                    ;;
+                pause_long)
+                    check_both wiliwili.log "$PREFIX" "scene=$SCENE paused_hold_seconds=" "长时间暂停参数"
+                    check_both wiliwili.log "$PREFIX" "paused status=ok" "EVT paused"
+                    check_both wiliwili.log "$PREFIX" "resumed status=ok" "EVT resumed"
+                    if grep -F "watchdog stall" "$RUN_DIR/wiliwili.log" >/dev/null 2>&1; then
+                        fail "长时间暂停触发 watchdog"
+                    else
+                        pass "长时间暂停未触发 watchdog"
+                    fi
                     ;;
                 pause_seek)
                     check_both wiliwili.log "$PREFIX" "scene=$SCENE mode=target target_ms=" "paused seek sent"
@@ -430,14 +455,15 @@ else
     fi
     READY_LINE=$(grep -nF 'SYNC_READY' "$RUN_DIR/wiliwili.log" 2>/dev/null |
         head -1 | cut -d: -f1)
-    START_LINE=$(grep -nF 'SYNC_START' "$RUN_DIR/wiliwili.log" 2>/dev/null |
+    START_LINE=$(grep -nE 'SYNC_START ' "$RUN_DIR/wiliwili.log" 2>/dev/null |
         head -1 | cut -d: -f1)
     if [ -z "$START_LINE" ] || { [ -n "$READY_LINE" ] && [ "$READY_LINE" -le "$START_LINE" ]; }; then
         pass "SYNC_START 不早于 SYNC_READY"
     else
         fail "SYNC_START 早于 SYNC_READY"
     fi
-    if [ "$SCENE" = "pause_resume" ]; then
+    if [ "$SCENE" = "pause_resume" ] || [ "$SCENE" = "pause_repeat" ] || \
+       [ "$SCENE" = "pause_long" ]; then
         check_pattern wiliwili.log "SYNC_TARGET" "pause 场景 SYNC_TARGET"
     fi
     if [ "$SCENE" = "seek_forward" ] || [ "$SCENE" = "seek_backward" ]; then

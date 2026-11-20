@@ -393,6 +393,51 @@ int main(int argc, char* argv[]) {
                         });
                     });
                 });
+            } else if (scene == "pause_repeat") {
+                d27ExpectPlaying(scene, timeout * 5, [scene]() {
+                    MPVCore::instance().pause();
+                    d27ExpectPaused(scene, 150, [scene]() {
+                        brls::delay(200, [scene]() {
+                            d27Log("CMD", scene, "mode=second_pause status=sent");
+                            MPVCore::instance().pause();
+                            brls::delay(500, [scene]() {
+                                MPVCore::instance().resume();
+                                d27ExpectPlaying(scene, 150, [scene]() {
+                                    d27Log("CMD", scene, "status=ok");
+                                });
+                            });
+                        });
+                    });
+                });
+            } else if (scene == "pause_race") {
+                d27ExpectPlaying(scene, timeout * 5, [scene, timeout]() {
+                    d27Log("CMD", scene, "mode=pause_resume_no_wait status=sent");
+                    MPVCore::instance().pause();
+                    MPVCore::instance().resume();
+                    brls::delay(750, [scene, timeout]() {
+                        d27ExpectPlaying(scene, timeout * 5, [scene]() {
+                            d27Log("CMD", scene, "status=ok");
+                        });
+                    });
+                });
+            } else if (scene == "pause_long") {
+                int after = atoi(d27Arg(args, "after").c_str());
+                if (after <= 0) after = 20;
+                d27ExpectPlaying(scene, timeout * 5, [scene, after]() {
+                    MPVCore::instance().pause();
+                    d27ExpectPaused(scene, 150, [scene, after]() {
+                        char detail[128];
+                        snprintf(detail, sizeof(detail),
+                                 "paused_hold_seconds=%d status=sent", after);
+                        d27Log("CMD", scene, detail);
+                        brls::delay(after * 1000, [scene]() {
+                            MPVCore::instance().resume();
+                            d27ExpectPlaying(scene, 150, [scene]() {
+                                d27Log("CMD", scene, "status=ok");
+                            });
+                        });
+                    });
+                });
             } else if (scene == "quality_change") {
                 int qn = atoi(d27Arg(args, "qn").c_str());
                 if (qn <= 0) {

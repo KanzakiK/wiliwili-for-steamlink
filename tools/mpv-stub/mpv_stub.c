@@ -2094,22 +2094,28 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
         }
         if (strcmp(prop, "pause") == 0) {
             int yes = strcmp(val, "yes") == 0 || strcmp(val, "true") == 0 || strcmp(val, "1") == 0;
+            int duplicatePause = 0;
             /* 先更新期望态：daemon 若在事件上报前被杀，恢复时仍能让 UI 按钮一致。 */
             pthread_mutex_lock(&ctx->daemonMutex);
+            if (yes && ctx->expectedPause && ctx->activeEpoch.active &&
+                strcmp(ctx->activeEpoch.desired, "pause") == 0)
+                duplicatePause = 1;
             ctx->expectedPause = yes;
             if (!yes) ctx->lastResumeMs = monotonicMs();
             pthread_mutex_unlock(&ctx->daemonMutex);
-            int rc = yes ? send_sync_command(ctx, SL_CMD_PAUSE, "pause_resume",
-                                             SL_SYNC_TARGET_PENDING,
-                                             SL_SYNC_DESIRED_PAUSE, "")
-                         : send_resume_command(ctx, "pause_resume");
+            int rc = duplicatePause ? MPV_ERROR_SUCCESS
+                     : yes ? send_sync_command(ctx, SL_CMD_PAUSE, "pause_resume",
+                                               SL_SYNC_TARGET_PENDING,
+                                               SL_SYNC_DESIRED_PAUSE, "")
+                           : send_resume_command(ctx, "pause_resume");
             uint64_t pauseGen = 0, pauseReq = 0;
             pthread_mutex_lock(&ctx->daemonMutex);
             pauseGen = ctx->fileGeneration;
             pauseReq = ctx->lastCommandReq;
             pthread_mutex_unlock(&ctx->daemonMutex);
             d27_log(ctx, "CMD", pauseGen, pauseReq,
-                    "set pause=%s status=sent", yes ? "yes" : "no");
+                    "set pause=%s status=%s", yes ? "yes" : "no",
+                    duplicatePause ? "duplicate" : "sent");
             return rc;
         }
         if (strcmp(prop, "volume") == 0) {
