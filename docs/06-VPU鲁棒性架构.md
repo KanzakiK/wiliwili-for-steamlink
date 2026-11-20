@@ -78,6 +78,7 @@ Dirty Flag 语义：
 
 - `heartbeat()` 只读 atomic 字段，不调用 `stats()`，不取锁，不查数据源。
 - 快照字段：最后成功提交帧时间、内部 stage、videoFrames、playing、inTransition、currentPaused、targetPaused、seeking、workerAlive。
+- 反压快照：队列超过 4 秒后暂停喂帧，心跳增加 `backpressure`。反压期间挂起 watchdog 判定最多 10 秒；旧值 30 秒会让真实停滞长时间无提示，已下调。
 - `lastFrameTimeMs` 在 `SubmitFrame` 成功后更新；播放线程退出时存活状态必须变为不可用。
 - heartbeat 经 IPC 命令/事件上报，兼容层写入 watchdog 可见快照。
 
@@ -101,6 +102,7 @@ heartbeat 扩展字段：
 
 - `presentationMs`：直接用播放线程已有的无锁 `position_`，不调用 `stats()`。
 - `videoQueueMs`：用无锁 `videoQueueMs_`，辅助识别队列增长。
+- `backpressure`：队列反压标志；hard/soft 卡顿日志分别记录 `bp`，hard 日志同时记录 `vq/pos`，用于区分“无新帧提交”和“队列不消化”。
 - `networkErrorAgeMs`：HTTP 重试/下载失败时刷新原子时间戳，用于近期网络错误排除。
 
 软卡顿判据（阈值先用 env 校准）：
