@@ -335,6 +335,43 @@ else
     pass "本 run 无 watchdog 硬卡顿"
 fi
 
+# D28：统一日志中的同步事件必须带 epoch；START 不得早于 READY。
+SYNC_COUNT=$(grep -c -E 'SYNC_(BEGIN|TARGET|READY|START|DRIFT|END)' "$RUN_DIR/wiliwili.log" 2>/dev/null || true)
+if [ "${SYNC_COUNT:-0}" -eq 0 ]; then
+    pass "本 run 无 D28 SYNC_* 日志"
+else
+    pass "D28 SYNC_* 日志数量=$SYNC_COUNT"
+    SYNC_NO_EPOCH=$(grep -E 'SYNC_(BEGIN|TARGET|READY|START|DRIFT|END)' "$RUN_DIR/wiliwili.log" 2>/dev/null |
+        grep -vc 'epoch=' || true)
+    if [ "${SYNC_NO_EPOCH:-0}" -eq 0 ]; then
+        pass "所有 SYNC_* 行带 epoch"
+    else
+        fail "有 $SYNC_NO_EPOCH 行 SYNC_* 缺少 epoch"
+    fi
+    SYNC_END_NO_STATUS=$(grep -F 'SYNC_END' "$RUN_DIR/wiliwili.log" 2>/dev/null |
+        grep -vc 'status=' || true)
+    if [ "${SYNC_END_NO_STATUS:-0}" -eq 0 ]; then
+        pass "所有 SYNC_END 带 status"
+    else
+        fail "有 $SYNC_END_NO_STATUS 行 SYNC_END 缺少 status"
+    fi
+    READY_LINE=$(grep -nF 'SYNC_READY' "$RUN_DIR/wiliwili.log" 2>/dev/null |
+        head -1 | cut -d: -f1)
+    START_LINE=$(grep -nF 'SYNC_START' "$RUN_DIR/wiliwili.log" 2>/dev/null |
+        head -1 | cut -d: -f1)
+    if [ -z "$START_LINE" ] || { [ -n "$READY_LINE" ] && [ "$READY_LINE" -le "$START_LINE" ]; }; then
+        pass "SYNC_START 不早于 SYNC_READY"
+    else
+        fail "SYNC_START 早于 SYNC_READY"
+    fi
+    if [ "$SCENE" = "pause_resume" ]; then
+        check_pattern wiliwili.log "SYNC_TARGET" "pause 场景 SYNC_TARGET"
+    fi
+    if [ "$SCENE" = "seek_forward" ] || [ "$SCENE" = "seek_backward" ]; then
+        check_pattern wiliwili.log "target_ms=" "seek 场景毫秒目标"
+    fi
+fi
+
 if [ "$FAILURES" -eq 0 ]; then
     echo "RESULT: PASS $RUN_DIR"
     exit 0
