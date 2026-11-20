@@ -191,7 +191,8 @@ else
                     ;;
                 quality_change)
                     SCENE_ARGS=$(sed -n 's/^args=//p' "$RUN_DIR/manifest.txt" 2>/dev/null | head -1)
-                    REQUESTED_QN=$(printf '%s' "$SCENE_ARGS" | sed -n 's/.*qn=\([^;]*\).*/\1/p')
+                    REQUESTED_QN=$(printf '%s' "$SCENE_ARGS" | tr '; ' '\n\n' |
+                        sed -n 's/^qn=\([^;]*\)$/\1/p' | head -1)
                     if [ -z "$REQUESTED_QN" ]; then
                         fail "quality_change 缺少 qn"
                     else
