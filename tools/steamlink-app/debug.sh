@@ -21,7 +21,7 @@ PASS=${PASS:-}
 CONTENT=${CONTENT:-}
 SCENE=${SCENE:-}
 RUN_SECONDS=${RUN_SECONDS:-30}
-SYNC_OFFSET_MS=${SYNC_OFFSET_MS:-}
+SYNC_OFFSET_MS=${SYNC_OFFSET_MS:-25}
 HEALTH_FORCE=0
 HEALTH_WINDOW_MS=${HEALTH_WINDOW_MS:-}
 HEALTH_PROGRESS_MS=${HEALTH_PROGRESS_MS:-}
@@ -90,7 +90,7 @@ SCP="sshpass -p $PASS scp -o StrictHostKeyChecking=no"
     echo "scene=$SCENE"
     echo "args=${SCENE_ARGS[*]:-}"
     echo "flags=${WILI_FLAGS[*]:-}"
-    echo "sync_offset_ms=${SYNC_OFFSET_MS:-0}"
+    echo "sync_offset_ms=${SYNC_OFFSET_MS:-25}"
     echo "health_force=$HEALTH_FORCE"
     echo "health_window_ms=${HEALTH_WINDOW_MS:-}"
     echo "health_progress_ms=${HEALTH_PROGRESS_MS:-}"
@@ -131,10 +131,7 @@ wili_flags_joined=""
 for f in "${WILI_FLAGS[@]:-}"; do
     wili_flags_joined="$wili_flags_joined $f"
 done
-offset_export=""
-if [ -n "$SYNC_OFFSET_MS" ]; then
-    offset_export=" SL_SYNC_AUDIO_OFFSET_MS=\"$SYNC_OFFSET_MS\""
-fi
+offset_export=" SL_SYNC_AUDIO_OFFSET_MS=\"$SYNC_OFFSET_MS\""
 health_export=""
 if [ "$HEALTH_FORCE" = "1" ]; then
     health_export=" SL_HEALTH_FORCE=1"

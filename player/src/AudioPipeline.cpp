@@ -31,6 +31,7 @@ static bool debugFaultEnabled(const char* name) {
 }
 
 constexpr int kFrameMs = 50;
+constexpr double kDefaultSyncOffsetMs = 25.0;
 constexpr int kSinkRateHz = 48000; /* SLAudio.h: native frequency is 48000 Hz */
 constexpr std::size_t kPcmDumpLimitBytes = 8u * 1024u * 1024u;
 constexpr size_t kPrerollLimit = 2 * 1024 * 1024;
@@ -62,7 +63,7 @@ bool AudioPipeline::start(CSLAudioContext* context, AVFormatContext* format,
     source_ = source;
     audioIndex_ = audioIndex;
     selfDemux_ = selfDemux;
-    startOffsetSec_ = 0.0;
+    startOffsetSec_ = kDefaultSyncOffsetMs / 1000.0;
     if (const char* offset = std::getenv("SL_SYNC_AUDIO_OFFSET_MS"))
         startOffsetSec_ = std::atof(offset) / 1000.0;
 
