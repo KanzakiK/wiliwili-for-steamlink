@@ -102,10 +102,12 @@ bool AudioPipeline::start(CSLAudioContext* context, AVFormatContext* format,
     }
 
     preroll_.clear();
+    prerollBytes_.store(0);
     started_ = false;
     startedFlag_ = false;
     submittedBytes_ = 0;
     lastQueued_ = 0;
+    sinkQueueSamples_.store(0);
     skipMs_ = 0;
     startAt_ = 0.0;
     warned_ = false;
@@ -113,8 +115,7 @@ bool AudioPipeline::start(CSLAudioContext* context, AVFormatContext* format,
     paused_ = false;
     seekRequest_ = false;
     seekActive_ = false;
-    seekMuted_ = false;
-    seekSequence_ = 0;
+    ack_.reset();
     seekTarget_ = 0.0;
     startPending_ = false;
     pendingStartAt_ = 0.0;
@@ -124,6 +125,8 @@ bool AudioPipeline::start(CSLAudioContext* context, AVFormatContext* format,
                sourceRate, kSinkRateHz, frameBytes_, kFrameMs);
 
     thread_ = std::thread(&AudioPipeline::threadMain, this);
+    if (stream_)
+        sinkQueueSamples_.store(SLAudio_GetQueuedAudioSamples(stream_));
     return true;
 }
 
@@ -161,13 +164,15 @@ void AudioPipeline::stop() {
     startedFlag_ = false;
     submittedBytes_ = 0;
     lastQueued_ = 0;
+    sinkQueueSamples_.store(0);
     pendingSize_ = 0;
     preroll_.clear();
+    prerollBytes_.store(0);
     abort_ = false;
     paused_ = false;
     seekRequest_ = false;
     seekActive_ = false;
-    seekMuted_ = false;
+    ack_.reset();
     startPending_ = false;
 }
 
@@ -200,20 +205,19 @@ void AudioPipeline::setVolume(int volume) {
     volume_ = std::min(100, std::max(0, volume));
 }
 
-void AudioPipeline::requestSeek(double targetSeconds) {
+std::uint64_t AudioPipeline::requestSeek(double targetSeconds) {
     if (!thread_.joinable())
-        return;
+        return 0;
 
     std::uint64_t sequence;
     {
         std::lock_guard<std::mutex> lock(lock_);
-        sequence = seekSequence_.fetch_add(1) + 1;
+        sequence = ack_.begin();
         seekTarget_ = targetSeconds;
         seekRequest_.store(true);
         seekActive_.store(true);
         /* 请求当帧就阻断旧音频：writeFrame 输出静音，旧启动点失效。
          * 已排队的压缩帧直接丢弃，解码线程持有的 PCM 在 seekInternal 中清理。 */
-        seekMuted_.store(true);
         startPending_ = false;
         startAt_.store(0.0);
         skipMs_.store(0);
@@ -225,6 +229,7 @@ void AudioPipeline::requestSeek(double targetSeconds) {
     sl::d27Log("AUDIO", "seek queued seq=%llu target=%.3f",
                (unsigned long long)sequence, targetSeconds);
     cond_.notify_all();
+    return sequence;
 }
 
 void AudioPipeline::scheduleStart(double delayMs, double skipMs) {
@@ -239,7 +244,7 @@ void AudioPipeline::scheduleStart(double delayMs, double skipMs) {
             pendingStartAt_ = monotonicSeconds() + std::max(0.0, delayMs) / 1000.0;
             pendingStartDelayMs_ = delayMs;
             pendingStartSkipMs_ = skipMs;
-            pendingStartSequence_ = seekSequence_.load();
+            pendingStartSequence_ = ack_.sequence.load();
         } else {
             startPending_ = false;
             applyStartLocked(delayMs, skipMs);
@@ -270,6 +275,13 @@ double AudioPipeline::delayMs() const {
     if (rate <= 0)
         return 0.0;
     return (double)lastQueued_.load() / 2.0 / rate * 1000.0;
+}
+
+double AudioPipeline::prerollMs() const {
+    int rate = rate_.load();
+    if (rate <= 0)
+        return 0.0;
+    return (double)prerollBytes_.load() * 1000.0 / (rate * 4.0);
 }
 
 int AudioPipeline::queuedPackets() const {
@@ -303,7 +315,7 @@ void AudioPipeline::threadMain() {
                 if (seekRequest_) {
                     seek = true;
                     target = seekTarget_;
-                    sequence = seekSequence_.load();
+                    sequence = ack_.sequence.load();
                 }
             }
             if (seek) {
@@ -336,7 +348,7 @@ void AudioPipeline::threadMain() {
                 break;
             if (seekRequest_) {
                 double target = seekTarget_;
-                std::uint64_t sequence = seekSequence_.load();
+                std::uint64_t sequence = ack_.sequence.load();
                 lock.unlock();
                 finishSeek(sequence, seekInternal(target));
                 continue;
@@ -444,6 +456,7 @@ void AudioPipeline::submit(const uint8_t* data, int size) {
                 return;
             if (!canStart()) {
                 preroll_.insert(preroll_.end(), data, data + size);
+                prerollBytes_.fetch_add((size_t)size);
                 return;
             }
         }
@@ -466,6 +479,7 @@ void AudioPipeline::submit(const uint8_t* data, int size) {
                          (int)(preroll_.size() - skipBytes));
         }
         preroll_.clear();
+        prerollBytes_.store(0);
     }
 
     submitDirect(data, size);
@@ -500,6 +514,7 @@ bool AudioPipeline::drainFrame() {
         }
         uint32_t queued = SLAudio_GetQueuedAudioSamples(stream_);
         lastQueued_ = queued;
+        sinkQueueSamples_.store(queued);
         if ((int)queued <= queueTarget())
             break;
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -526,7 +541,7 @@ void AudioPipeline::writeFrame(void* output, const uint8_t* data, int size) cons
     /* 请求 seek 后到新 stream 重建完成前，连已解码的旧 PCM 也不能出声。
      * SLAudio 没有 flush/pause 接口，静音是请求入口能立即生效的唯一手段；
      * 硬件队列里已提交的少量帧仍由 seekInternal 的 FreeStream 清掉。 */
-    if (seekMuted_.load()) {
+    if (ack_.isMuted()) {
         memset(output, 0, (size_t)size);
         return;
     }
@@ -595,47 +610,71 @@ bool AudioPipeline::seekInternal(double targetSeconds) {
 
     pendingSize_ = 0;
     preroll_.clear();
+    prerollBytes_.store(0);
     started_ = false;
     startedFlag_ = false;
     submittedBytes_ = 0;
     skipMs_ = 0;
     startAt_ = 0.0;
-    lastQueued_ = 0;
+    lastQueued_ = 0; /* 软件计数清零，不作为 SDK 队列 ACK。 */
 
     if (stream_) {
         SLAudio_FreeStream(stream_);
         stream_ = nullptr;
     }
-    ensureStream();
+    if (!ensureStream()) {
+        sl::d27Log("AUDIO", "seek stream recreate failed");
+        sinkQueueSamples_.store(0);
+        return false;
+    }
+    uint32_t queued = SLAudio_GetQueuedAudioSamples(stream_);
+    sinkQueueSamples_.store(queued);
+    bool ready = seekAckReady(ok, true, queued);
+    if (!ready && queued != 0)
+        sl::d27Log("AUDIO", "seek queue not empty queued=%u", queued);
+    return ready;
+}
 
-    return ok;
+static const char* seekStatusName(SeekStatus status) {
+    switch (status) {
+        case SeekStatus::None: return "none";
+        case SeekStatus::Pending: return "pending";
+        case SeekStatus::Success: return "success";
+        case SeekStatus::Failed: return "failed";
+        case SeekStatus::Stale: return "stale";
+    }
+    return "unknown";
 }
 
 void AudioPipeline::finishSeek(std::uint64_t sequence, bool ok) {
     bool latest = false;
     {
         std::lock_guard<std::mutex> lock(lock_);
-        latest = sequence == seekSequence_.load();
+        latest = sequence == ack_.sequence.load();
         if (!latest) {
             sl::d27Log("AUDIO", "drop stale seek seq=%llu current=%llu",
                        (unsigned long long)sequence,
-                       (unsigned long long)seekSequence_.load());
+                       (unsigned long long)ack_.sequence.load());
         } else {
             seekRequest_.store(false);
-            /* 首帧对齐可能在音频 stream 重建完成前到达；此时原样应用，
-             * 保证 scheduleStart 的延时/skip 契约不因异步化而丢失。 */
-            if (startPending_ && pendingStartSequence_ == sequence) {
+            if (ok && startPending_ && pendingStartSequence_ == sequence) {
+                /* 首帧对齐可能在音频 stream 重建完成前到达；成功时原样应用。 */
                 applyStartAtLocked(pendingStartAt_, pendingStartSkipMs_);
-                startPending_ = false;
             }
+            startPending_ = false;
+            ack_.finish(sequence, ok);
             seekActive_.store(false);
-            seekMuted_.store(false);
+            /* 失败时 SeekAckState::finish 保留 mute，绝不输出旧 PCM。 */
         }
     }
     cond_.notify_all();
     if (latest) {
-        sl::d27Log("AUDIO", "seek done seq=%llu ok=%d",
-                   (unsigned long long)sequence, ok ? 1 : 0);
+        sl::d27Log("AUDIO", "seek done seq=%llu ok=%d result=%s muted=%d "
+                            "sink_queued=%u preroll_ms=%.1f",
+                   (unsigned long long)sequence, ok ? 1 : 0,
+                   seekStatusName(seekResult(sequence)),
+                   ack_.isMuted() ? 1 : 0, sinkQueueSamples_.load(),
+                   prerollMs());
     }
 }
 

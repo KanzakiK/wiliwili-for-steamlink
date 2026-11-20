@@ -54,6 +54,11 @@ add_executable(session_meta_test test/session_meta_test.c)
 target_include_directories(session_meta_test PRIVATE include)
 target_compile_options(session_meta_test PRIVATE -Wall -Wextra)
 
+# D28 S02 Audio ACK 状态契约测试（纯 C++，不链接 FFmpeg/SLAudio）
+add_executable(audio_ack_test test/audio_ack_test.cpp)
+target_include_directories(audio_ack_test PRIVATE src include)
+target_compile_options(audio_ack_test PRIVATE -Wall -Wextra)
+
 # D27 compat 发送端集成测试：假 daemon 只收帧，不打开 SlPlayer/VPU。
 add_executable(compat_session_test
     test/compat_session_test.c
