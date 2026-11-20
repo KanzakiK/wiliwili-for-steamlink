@@ -239,6 +239,12 @@ HEALTH_FORCE=$(sed -n 's/^health_force=//p' "$RUN_DIR/manifest.txt" 2>/dev/null 
 if [ "$HEALTH_FORCE" = "1" ]; then
     check_pattern wiliwili.log "][COMPAT][run=$RUN_ID]" "compat 统一行"
     check_pattern wiliwili.log "health stall detected reason=soft" "compat 软卡顿检测"
+    if grep -F "health stall detected reason=soft" "$RUN_DIR/wiliwili.log" 2>/dev/null |
+       grep -E "bp=[01]( |$)" >/dev/null 2>&1; then
+        pass "软卡顿日志含反压状态"
+    else
+        fail "软卡顿日志缺少 bp 字段"
+    fi
     check_pattern wiliwili.log "health hint shown reason=soft" "播放页软卡顿提示"
     HEALTH_LINES=$(grep -c -F 'health stall detected reason=soft' "$RUN_DIR/wiliwili.log" 2>/dev/null || true)
     if [ "$HEALTH_LINES" -eq 1 ]; then
@@ -256,6 +262,14 @@ fi
 if grep -F "watchdog stall" "$RUN_DIR/wiliwili.log" >/dev/null 2>&1; then
     check_pattern wiliwili.log "health stall detected reason=hard" "compat 硬卡顿检测"
     check_pattern wiliwili.log "health hint shown reason=hard" "播放页硬卡顿提示"
+    WATCHDOG_LINES=$(grep -c -F "watchdog stall" "$RUN_DIR/wiliwili.log" 2>/dev/null || true)
+    WATCHDOG_FIELD_LINES=$(grep -F "watchdog stall" "$RUN_DIR/wiliwili.log" 2>/dev/null |
+        grep -c -E "bp=[01] vq=[0-9]+ms pos=[0-9]+(\.[0-9]+)?ms" || true)
+    if [ "$WATCHDOG_LINES" -gt 0 ] && [ "$WATCHDOG_FIELD_LINES" -eq "$WATCHDOG_LINES" ]; then
+        pass "watchdog 硬卡顿日志含 bp/vq/pos"
+    else
+        fail "watchdog 硬卡顿日志字段不完整: $WATCHDOG_FIELD_LINES/$WATCHDOG_LINES"
+    fi
     if grep -F "scene=auto_quality_downgrade" "$RUN_DIR/wiliwili.log" >/dev/null 2>&1; then
         if grep -F "scene=auto_quality_downgrade reason=hard_stall from_qn=" "$RUN_DIR/wiliwili.log" 2>/dev/null | grep -F "status=sent" >/dev/null 2>&1; then
             pass "硬卡顿自动降级请求"

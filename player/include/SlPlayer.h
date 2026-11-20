@@ -97,6 +97,8 @@ struct Heartbeat {
     /* D22 软卡顿判据：呈现位置、VPU 队列和最近网络错误的年龄。 */
     double presentationMs = 0.0;
     unsigned videoQueueMs = 0;
+    /* VPU 队列超过上限后暂停喂帧；hard 日志需要单独记录这个状态。 */
+    bool backpressure = false;
     /* INT64_MAX 表示未记录网络错误；否则为距最近一次重试/失败的墙钟毫秒。 */
     std::int64_t networkErrorAgeMs = INT64_MAX;
 };

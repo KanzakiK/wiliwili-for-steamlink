@@ -152,6 +152,7 @@ struct mpv_handle {
     double hbPresentationMs;
     unsigned hbVideoQueueMs;
     long long hbNetworkErrorAgeMs;
+    int hbBackpressure;
     int hbHealthValid;
     uint64_t hbRequestId;
 
@@ -767,6 +768,7 @@ static int start_daemon_process(mpv_handle *ctx, const char *reason) {
     ctx->hbPresentationMs = 0;
     ctx->hbVideoQueueMs = 0;
     ctx->hbNetworkErrorAgeMs = 0;
+    ctx->hbBackpressure = 0;
     ctx->hbHealthValid = 0;
     ctx->healthGeneration = UINT64_MAX;
     ctx->healthHintShown = 0;
@@ -950,6 +952,7 @@ static void *watchdog_thread(void *arg) {
             double hbPresentationMs = 0.0;
             unsigned hbQueueMs = 0;
             long long hbNetErrorAgeMs = 0;
+            int hbBackpressure = 0;
             uint64_t hbRequestId = 0;
             pthread_mutex_lock(&ctx->daemonMutex);
             if (ctx->watchdogRunning && !ctx->shuttingDown &&
@@ -971,6 +974,7 @@ static void *watchdog_thread(void *arg) {
                 hbPresentationMs = ctx->hbPresentationMs;
                 hbQueueMs = ctx->hbVideoQueueMs;
                 hbNetErrorAgeMs = ctx->hbNetworkErrorAgeMs;
+                hbBackpressure = ctx->hbBackpressure;
                 hbRequestId = ctx->hbRequestId;
                 if (ctx->healthGeneration != fileGen) {
                     ctx->healthGeneration = fileGen;
@@ -995,9 +999,10 @@ static void *watchdog_thread(void *arg) {
                         d27_log(ctx, "COMPAT", (uint64_t)gen, hbRequestId,
                                 "watchdog stall pid=%d hb_age=%lldms frame_age=%lldms "
                                 "playing=%d transition=%d pause=%d worker_alive=%d "
-                                "action=%s status=kill",
+                                "bp=%d vq=%ums pos=%.1fms action=%s status=kill",
                                 pid, hbAge, frameAge, playing, inTransition,
-                                expPause, workerAlive,
+                                expPause, workerAlive, hbBackpressure, hbQueueMs,
+                                hbPresentationMs,
                                 noHeartbeat ? "no_heartbeat" :
                                 (workerDead ? "worker_dead" : "no_frame"));
                         if (!ctx->healthHintShown) {
@@ -1042,10 +1047,10 @@ static void *watchdog_thread(void *arg) {
                            (now - ctx->healthBaselineMs >= healthWindowMs || healthForce)) {
                     d27_log(ctx, "COMPAT", (uint64_t)fileGen, hbRequestId,
                             "health stall detected reason=soft present=%.0f base=%.0f queue=%u "
-                            "frames=%d frame_age=%lld net_age=%lld force=%d -> hint shown",
+                            "frames=%d frame_age=%lld net_age=%lld bp=%d force=%d -> hint shown",
                             hbPresentationMs, ctx->healthBaselinePresentationMs,
                             hbQueueMs, hbVideoFrames, frameAge,
-                            hbNetErrorAgeMs, healthForce ? 1 : 0);
+                            hbNetErrorAgeMs, hbBackpressure, healthForce ? 1 : 0);
                     ctx->healthHintShown = 1;
                     fire_health_hint(ctx, SL_HEALTH_HINT_SOFT);
                 }
@@ -1187,6 +1192,7 @@ static void *rx_thread(void *arg) {
             ctx->lastResumeMs = monotonicMs();
             ctx->heartbeatReceivedMs = ctx->lastResumeMs;
             ctx->hbLastFrameTimeMs = 0;
+            ctx->hbBackpressure = 0;
             int restorePause = ctx->restorePausePending;
             ctx->restorePausePending = 0;
             pthread_mutex_unlock(&ctx->daemonMutex);
@@ -1316,6 +1322,8 @@ static void *rx_thread(void *arg) {
                 ctx->hbVideoQueueMs = nf >= 14 ? (unsigned)strtoul(fields[13], NULL, 10) : 0;
                 ctx->hbNetworkErrorAgeMs =
                     nf >= 15 ? strtoll(fields[14], NULL, 10) : 0;
+                ctx->hbBackpressure =
+                    nf >= 16 ? (atoi(fields[15]) ? 1 : 0) : 0;
                 ctx->hbHealthValid = nf >= 15 ? 1 : 0;
                 ctx->hbRequestId = evtReq;
                 ctx->hbValid = 1;

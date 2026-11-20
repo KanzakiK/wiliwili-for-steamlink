@@ -33,8 +33,9 @@ namespace {
 
 constexpr unsigned kVideoQueueMaxMs = 4000;
 /* 队列反压期间不喂帧，watchdog 必须挂起；但只给有限时间，
- * 防止 VPU 真死锁时永久卡在 loading。 */
-constexpr std::int64_t kBackpressureWatchdogSuspendMs = 30000;
+ * 防止 VPU 真死锁时永久卡在 loading。真机 30 秒等待过长，
+ * 保留 10 秒：覆盖队列自然回落，同时避免长时间无提示黑屏。 */
+constexpr std::int64_t kBackpressureWatchdogSuspendMs = 10000;
 /* ---- VPU 鲁棒性参数（第 1 步：事前防御 + Dirty Flag）---- */
 /* 脏退出标记：起调前写、正常退出（FreeContext 之后）删；残留 = 上次异常退出 */
 constexpr const char* kVpuDirtyFlagPath = "/tmp/slplayer_vpu.lock";
@@ -352,6 +353,7 @@ struct Player::Impl {
         hb.videoFrames = videoFrames_.load();
         hb.presentationMs = position_.load() * 1000.0;
         hb.videoQueueMs = videoQueueMs_.load();
+        hb.backpressure = backpressure_.load();
         const std::int64_t videoErrorMs = videoSource_.lastNetworkErrorMs();
         const std::int64_t audioErrorMs = audioSource_.lastNetworkErrorMs();
         const std::int64_t latestErrorMs = (std::max)(videoErrorMs, audioErrorMs);

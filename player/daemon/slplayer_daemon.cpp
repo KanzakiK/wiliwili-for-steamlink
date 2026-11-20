@@ -545,13 +545,13 @@ int main(int argc, char** argv) {
             sl::Heartbeat hb = player.heartbeat();
             char args[400];
             snprintf(args, sizeof(args),
-                     "%lld\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%.3f\t%u\t%lld",
+                     "%lld\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%.3f\t%u\t%lld\t%d",
                      (long long)hb.lastFrameTimeMs, hb.stage,
                      hb.playing ? 1 : 0, hb.inTransition ? 1 : 0,
                      hb.videoFrames, hb.currentPaused ? 1 : 0,
                      hb.targetPaused ? 1 : 0, hb.seeking ? 1 : 0,
                      hb.workerAlive ? 1 : 0, hb.presentationMs, hb.videoQueueMs,
-                     (long long)hb.networkErrorAgeMs);
+                     (long long)hb.networkErrorAgeMs, hb.backpressure ? 1 : 0);
             emitContext(SL_EVT_HEARTBEAT, parseUnsigned(f[2]), args);
         } else if (cmd == SL_CMD_QUIT) {
             daemonLog("quit 命令");

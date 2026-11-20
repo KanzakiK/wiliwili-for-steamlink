@@ -204,7 +204,7 @@ static inline size_t sl_session_meta_format_args(const sl_session_meta_t *meta,
 #define SL_EVT_EOF            "eof"             /* eof<TAB>gen<TAB>req */
 #define SL_EVT_ERROR          "error"           /* error<TAB>gen<TAB>req<TAB>message */
 #define SL_EVT_FATAL          "fatal"           /* fatal<TAB>gen<TAB>req<TAB>type<TAB>message */
-#define SL_EVT_HEARTBEAT      "heartbeat"       /* heartbeat<TAB>gen<TAB>req<TAB>lastFrameTimeMs<TAB>stage<TAB>playing<TAB>inTransition<TAB>videoFrames<TAB>currentPaused<TAB>targetPaused<TAB>seeking<TAB>workerAlive<TAB>presentationMs<TAB>videoQueueMs<TAB>networkErrorAgeMs */
+#define SL_EVT_HEARTBEAT      "heartbeat"       /* heartbeat<TAB>gen<TAB>req<TAB>lastFrameTimeMs<TAB>stage<TAB>playing<TAB>inTransition<TAB>videoFrames<TAB>currentPaused<TAB>targetPaused<TAB>seeking<TAB>workerAlive<TAB>presentationMs<TAB>videoQueueMs<TAB>networkErrorAgeMs<TAB>backpressure */
 
 /* 首帧/进度事件的节流间隔（毫秒），避免 IPC 洪泛 */
 #define SL_EVT_PROGRESS_INTERVAL_MS 250
