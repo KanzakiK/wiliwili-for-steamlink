@@ -243,8 +243,11 @@ struct Player::Impl {
         pausePending_.store(false);
         lastTimelineRequestId_.store(spec.sync.requestId);
         stop_ = false;
+        /* 新流带 desired=pause 时，仍先完成本 epoch 的准备，再由 pauseFlush
+         * 进入 PAUSED 并回传 SL_EVT_PAUSED；直接设 paused_ 会跳过定位。 */
+        const bool startPaused = !spec.sync.desiredPlay;
         paused_ = false;
-        targetPaused_ = false;
+        targetPaused_ = startPaused;
         pendingSeek_ = -1.0;
         pendingSeekId_ = 0;
         latestSeekRequestId_ = 0;
@@ -252,6 +255,9 @@ struct Player::Impl {
         resumeRequestId_ = 0;
         seeking_ = false;
         pauseFlush_ = false;
+        pauseRequestId_.store(startPaused ? spec.sync.requestId : 0);
+        if (startPaused)
+            pauseFlush_ = true;
         pauseFlushed_ = false;
         resumeSeek_ = false;
         resumeInProgress_ = false;

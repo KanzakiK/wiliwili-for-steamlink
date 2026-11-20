@@ -588,7 +588,11 @@ int main(int argc, char** argv) {
             }
             opened = true;
             daemonLogReq(requestId, "open ok play");
-            player.play(0);
+            if (spec.sync.desiredPlay) {
+                player.play(0);
+            } else {
+                daemonLogReq(requestId, "open leave paused desired=pause");
+            }
         } else if (cmd == SL_CMD_PAUSE) {
             std::uint64_t req = parseUnsigned(f[2]);
             std::uint64_t gen = parseUnsigned(f[1]);

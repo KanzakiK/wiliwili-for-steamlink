@@ -94,8 +94,7 @@ else
     pass "统一日志无旧 source 前缀"
 fi
 
-SESSION=$(grep -F "scene=$SCENE" "$RUN_DIR/wiliwili.log" 2>/dev/null |
-    grep -F "status=ok" |
+SESSION=$(grep -F "scene=$SCENE status=ok" "$RUN_DIR/wiliwili.log" 2>/dev/null |
     sed -n 's/.*\[session=\([^]]*\)\].*/\1/p' | grep -v '^-' | head -1)
 if [ -z "$SESSION" ]; then
     fail "场景没有有效 session"
@@ -104,7 +103,7 @@ else
     PREFIX="[run=$RUN_ID][session=$SESSION]"
 
     case "$SCENE" in
-        play|seek_forward|seek_backward|pause_resume|quality_change)
+        play|seek_forward|seek_backward|pause_resume|pause_seek|quality_change|pause_quality|continuous_seek)
             check_pattern wiliwili.log "][UI]$PREFIX" "UI 统一行"
             check_pattern wiliwili.log "][UI]$PREFIX[gen=-][req=-] content start" "UI content start"
             check_pattern wiliwili.log "][COMPAT]$PREFIX" "compat 统一行"
@@ -173,11 +172,18 @@ else
             fi
 
             case "$SCENE" in
-                seek_forward|seek_backward)
+                seek_forward|seek_backward|pause_seek|continuous_seek)
                     check_both wiliwili.log "$PREFIX" "seek mode=" "CMD seek"
                     check_both wiliwili.log "$PREFIX" "seeked" "EVT seeked"
                     SCENE_ARGS=$(sed -n 's/^args=//p' "$RUN_DIR/manifest.txt" 2>/dev/null | head -1)
-                    if printf '%s' "$SCENE_ARGS" | grep -q 'target_ms='; then
+                    if [ "$SCENE" = "continuous_seek" ]; then
+                        check_both wiliwili.log "$PREFIX" "scene=$SCENE mode=continuous" "continuous seek sent"
+                        if printf '%s' "$SCENE_ARGS" | grep -q 'target2_ms='; then
+                            check_both wiliwili.log "$PREFIX" "scene=$SCENE seek_status=ok" "continuous seek first target"
+                        else
+                            fail "continuous_seek 缺少 target2_ms"
+                        fi
+                    elif printf '%s' "$SCENE_ARGS" | grep -q 'target_ms='; then
                         check_both wiliwili.log "$PREFIX" "scene=$SCENE mode=target" "seek target_ms mode"
                     elif printf '%s' "$SCENE_ARGS" | grep -q 'delta_ms='; then
                         check_both wiliwili.log "$PREFIX" "scene=$SCENE mode=delta" "seek delta_ms mode"
@@ -219,6 +225,27 @@ else
                     check_both wiliwili.log "$PREFIX" "set pause=" "CMD pause/resume"
                     check_both wiliwili.log "$PREFIX" "paused" "EVT paused"
                     check_both wiliwili.log "$PREFIX" "resumed" "EVT resumed"
+                    ;;
+                pause_seek)
+                    check_both wiliwili.log "$PREFIX" "scene=$SCENE mode=target target_ms=" "paused seek sent"
+                    check_both wiliwili.log "$PREFIX" "scene=$SCENE seek_status=ok paused=1" "paused seek target reached"
+                    check_both wiliwili.log "$PREFIX" "paused status=ok" "EVT paused"
+                    check_both wiliwili.log "$PREFIX" "resumed status=ok" "EVT resumed"
+                    check_pattern wiliwili.log "SYNC_TARGET" "paused seek SYNC_TARGET"
+                    ;;
+                pause_quality)
+                    RUN_PREFIX="[run=$RUN_ID]"
+                    SCENE_ARGS=$(sed -n 's/^args=//p' "$RUN_DIR/manifest.txt" 2>/dev/null | head -1)
+                    REQUESTED_QN=$(printf '%s' "$SCENE_ARGS" | tr '; ' '\n\n' |
+                        sed -n 's/^qn=\([^;]*\)$/\1/p' | head -1)
+                    if [ -z "$REQUESTED_QN" ]; then
+                        fail "pause_quality 缺少 qn"
+                    else
+                        check_both wiliwili.log "$RUN_PREFIX" "scene=$SCENE qn=$REQUESTED_QN old_qn=" "paused quality request"
+                        check_both wiliwili.log "$RUN_PREFIX" "scene=$SCENE qn=$REQUESTED_QN" "quality_status=ok" "paused quality new session"
+                        check_both wiliwili.log "$RUN_PREFIX" "paused status=ok" "EVT paused"
+                        check_both wiliwili.log "$RUN_PREFIX" "resumed status=ok" "EVT resumed"
+                    fi
                     ;;
             esac
 

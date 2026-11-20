@@ -74,17 +74,22 @@ static void send_event_frame(int fd, const char *name, const char *gen,
 
 static int validate_frames(char frames[][FRAME_CAP], int count) {
     int metas = 0;
+    int seekFrames = 0;
     for (int i = 0; i < count; ++i) {
         if (strncmp(frames[i], "seek\t", 5) == 0) {
-            fprintf(stderr, "FAIL: duplicate seek was sent at frame %d\n", i);
-            return 1;
+            ++seekFrames;
+            if (strstr(frames[i], "\t30.000") == NULL) {
+                fprintf(stderr, "FAIL: unexpected seek frame at %d\n", i);
+                return 1;
+            }
         }
         if (strncmp(frames[i], "meta\t", 5) != 0)
             continue;
         if (i + 1 >= count ||
             (strncmp(frames[i + 1], "open\t", 5) != 0 &&
              strncmp(frames[i + 1], "pause\t", 6) != 0 &&
-             strncmp(frames[i + 1], "resume\t", 7) != 0)) {
+             strncmp(frames[i + 1], "resume\t", 7) != 0 &&
+             strncmp(frames[i + 1], "seek\t", 5) != 0)) {
             fprintf(stderr, "FAIL: meta frame %d is not followed by a sync command\n", i);
             return 1;
         }
@@ -127,22 +132,37 @@ static int validate_frames(char frames[][FRAME_CAP], int count) {
                 return 1;
             }
         } else if (metas == 3) {
-            if (!strstr(frames[i], "epoch=3") ||
-                !strstr(frames[i], "target_ms=6789") ||
+            if (!strstr(frames[i], "epoch=4") ||
+                !strstr(frames[i], "target_ms=30000") ||
+                !strstr(frames[i], "reason=seek") ||
+                !strstr(frames[i], "desired=pause") ||
+                strcmp(cmdName, SL_CMD_SEEK) != 0) {
+                fprintf(stderr, "FAIL: paused seek meta contract\n");
+                return 1;
+            }
+        } else if (metas == 4) {
+            if (!strstr(frames[i], "epoch=4") ||
+                !strstr(frames[i], "target_ms=30000") ||
                 !strstr(frames[i], "reason=pause_resume") ||
                 !strstr(frames[i], "desired=play") ||
                 strcmp(cmdName, SL_CMD_RESUME) != 0) {
-                fprintf(stderr, "FAIL: resume meta must reuse pause epoch\n");
+                fprintf(stderr, "FAIL: resume meta must reuse paused seek epoch\n");
                 return 1;
             }
         }
         ++metas;
     }
-    if (metas != 4) {
-        fprintf(stderr, "FAIL: expected 4 meta frames, got %d\n", metas);
+    if (metas != 5) {
+        fprintf(stderr, "FAIL: expected 5 meta frames, got %d\n", metas);
         return 1;
     }
-    printf("D28_COMPAT frames=%d metas=%d adjacency=ok pause_resume=ok\n", count,
+    /* 第一处 duplicate seek 不得下发；只有暂停中的主动 seek 允许一帧。 */
+    if (seekFrames != 1) {
+        fprintf(stderr, "FAIL: expected one paused seek frame, got %d\n",
+                seekFrames);
+        return 1;
+    }
+    printf("D28_COMPAT frames=%d metas=%d adjacency=ok pause_seek_resume=ok\n", count,
            metas);
     return 0;
 }
@@ -274,13 +294,17 @@ int main(int argc, char **argv) {
     const char *pauseArgs[] = {"set", "pause", "yes", NULL};
     if (mpv_command_async(ctx, 3, pauseArgs) < 0) return 1;
     usleep(300000);
+    /* 暂停中主动 seek：新 epoch，target=30s，desired 仍为 pause。 */
+    const char *pausedSeekArgs[] = {"seek", "30", "absolute", NULL};
+    if (mpv_command_async(ctx, 4, pausedSeekArgs) < 0) return 1;
+    usleep(200000);
     const char *resumeArgs[] = {"set", "pause", "no", NULL};
-    if (mpv_command_async(ctx, 4, resumeArgs) < 0) return 1;
+    if (mpv_command_async(ctx, 5, resumeArgs) < 0) return 1;
     usleep(300000);
 
 #ifdef SL_D28_TEST_HOOKS
-    CHECK(sl_d28_test_active_epoch(ctx) == 3);
-    CHECK(sl_d28_test_active_epoch_target(ctx) == 6789);
+    CHECK(sl_d28_test_active_epoch(ctx) == 4);
+    CHECK(sl_d28_test_active_epoch_target(ctx) == 30000);
     sl_d28_test_end_active_epoch(ctx, "error", "watchdog");
     sl_d28_test_end_active_epoch(ctx, "error", "watchdog");
     CHECK(sl_d28_test_active_epoch(ctx) == 0);

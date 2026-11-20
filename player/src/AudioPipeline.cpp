@@ -387,35 +387,35 @@ void AudioPipeline::handleFrame(AVFrame* frame) {
     if (inputLayout.nb_channels <= 0)
         av_channel_layout_default(&inputLayout, 2);
 
-    if (!swr_) {
+    bool needSwrInit = !swr_ || inputRate != swrInputRate_ ||
+                       (int)frame->format != swrInputFormat_ ||
+                       inputLayout.nb_channels != swrInputChannels_;
+    if (needSwrInit) {
+        if (swr_)
+            swr_free(&swr_);
         AVChannelLayout outputLayout = AV_CHANNEL_LAYOUT_STEREO;
-        int ret = swr_alloc_set_opts2(&swr_, &outputLayout, AV_SAMPLE_FMT_S16,
-                                      sinkRate, &inputLayout,
-                                      (AVSampleFormat)frame->format, inputRate,
-                                      0, nullptr);
-        if (ret < 0 || swr_init(swr_) < 0) {
+        if (swr_alloc_set_opts2(&swr_, &outputLayout, AV_SAMPLE_FMT_S16,
+                                sinkRate, &inputLayout,
+                                (AVSampleFormat)frame->format, inputRate, 0,
+                                nullptr) < 0 ||
+            swr_init(swr_) < 0) {
             if (!warned_) {
-                sl::d27Log("AUDIO", "resampler init failed");
+                sl::d27Log("AUDIO",
+                           "resampler init failed in=%dHz fmt=%d ch=%d "
+                           "out=%dHz ch=2",
+                           inputRate, frame->format, inputLayout.nb_channels,
+                           sinkRate);
                 warned_ = true;
             }
             swr_free(&swr_);
             return;
         }
         swrInputRate_ = inputRate;
-    }
-
-    if (inputRate != swrInputRate_) {
-        /* 采样率变化（极罕见）：重建重采样器 */
-        swr_free(&swr_);
-        AVChannelLayout outputLayout = AV_CHANNEL_LAYOUT_STEREO;
-        if (swr_alloc_set_opts2(&swr_, &outputLayout, AV_SAMPLE_FMT_S16, sinkRate,
-                                &inputLayout, (AVSampleFormat)frame->format,
-                                inputRate, 0, nullptr) < 0 ||
-            swr_init(swr_) < 0) {
-            swr_free(&swr_);
-            return;
-        }
-        swrInputRate_ = inputRate;
+        swrInputFormat_ = (int)frame->format;
+        swrInputChannels_ = inputLayout.nb_channels;
+        sl::d27Log("AUDIO",
+                   "resampler init in=%dHz fmt=%d ch=%d out=%dHz fmt=S16 ch=2",
+                   inputRate, frame->format, inputLayout.nb_channels, sinkRate);
     }
 
     int maxOutput = (int)av_rescale_rnd(
@@ -607,6 +607,8 @@ bool AudioPipeline::seekInternal(double targetSeconds) {
     if (swr_)
         swr_free(&swr_);
     swrInputRate_ = 0;
+    swrInputFormat_ = 0;
+    swrInputChannels_ = 0;
 
     pendingSize_ = 0;
     preroll_.clear();

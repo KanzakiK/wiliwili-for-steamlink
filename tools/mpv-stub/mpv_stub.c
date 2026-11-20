@@ -604,8 +604,10 @@ static void sync_finalize_target_locked(mpv_handle *ctx, uint64_t gen,
         ctx->activeEpoch.requestId != req ||
         ctx->activeEpoch.targetResolved) {
         d27_log(ctx, "SYNC", gen, req,
-                "SYNC_TARGET ignored reason=identity_mismatch_or_resolved "
-                "target_ms=%lld", (long long)targetMs);
+                "SYNC_TARGET ignored epoch=%llu "
+                "reason=identity_mismatch_or_resolved target_ms=%lld",
+                (unsigned long long)ctx->activeEpoch.epoch,
+                (long long)targetMs);
         return;
     }
     ctx->activeEpoch.targetMs = targetMs;
@@ -1983,9 +1985,11 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
         snprintf(ctx->lastOpenCmd, sizeof(ctx->lastOpenCmd), "%s", frame);
         ctx->hasLastOpen = 1;
         ctx->playbackActive = 0; /* 首帧到达后才让 watchdog 接管 */
-        ctx->expectedPause = 0;
+        ctx->expectedPause = pausedHint ? 1 : 0;
+        /* 暂停中切清晰度的新流不能被 UI 的 FILE_LOADED 自动 resume 抢先恢复；
+         * 与 replay/failover 一样抑制这一帧，等新 session 自己的暂停完成。 */
+        ctx->suppressFileLoadedOnce = pausedHint ? 1 : 0;
         ctx->restorePausePending = 0;
-        ctx->suppressFileLoadedOnce = 0;
         ctx->suppressWatchdogReplay = 0;
         ctx->resumePosition = open_cmd_start(frame);
         openStart = ctx->resumePosition;
@@ -2097,6 +2101,7 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
          * 与 open 的 start= 等价时直接回执，避免第二次重建 VPU。
          * 0.05s 容差只用于吸收字符串/浮点误差，待真机校准。 */
         int duplicate = 0;
+        int seekDesiredPause = 0;
         pthread_mutex_lock(&ctx->daemonMutex);
         if (ctx->hasInitialSeekTarget && strcmp(mode, "absolute") == 0 &&
             fabs(target - ctx->initialSeekTarget) <= 0.05) {
@@ -2104,6 +2109,7 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
             ctx->hasInitialSeekTarget = 0;
         }
         ctx->lastResumeMs = monotonicMs();
+        seekDesiredPause = ctx->expectedPause ? 1 : 0;
         pthread_mutex_unlock(&ctx->daemonMutex);
         if (duplicate) {
             d27_log(ctx, "CMD", ctx->fileGeneration, 0,
@@ -2115,7 +2121,9 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
         update_prop_and_notify(ctx, "seeking", MPV_FORMAT_FLAG, v);
         int rc = send_sync_command(ctx, SL_CMD_SEEK, "seek",
                                    (int64_t)llround(target * 1000.0),
-                                   SL_SYNC_DESIRED_PLAY, "%.3f", target);
+                                   seekDesiredPause ? SL_SYNC_DESIRED_PAUSE
+                                                    : SL_SYNC_DESIRED_PLAY,
+                                   "%.3f", target);
         uint64_t seekGen = 0, seekReq = 0;
         pthread_mutex_lock(&ctx->daemonMutex);
         seekGen = ctx->fileGeneration;

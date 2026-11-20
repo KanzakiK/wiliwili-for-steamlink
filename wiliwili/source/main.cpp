@@ -26,6 +26,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <functional>
 #include <string>
 
@@ -79,17 +80,41 @@ void d27ExpectPaused(const std::string& scene, int attempts,
     });
 }
 
-void d27ExpectPosition(const std::string& scene, double target, int attempts) {
+void d27ExpectPositionThen(const std::string& scene, double target, int attempts,
+                           const std::function<void()>& done) {
     if (fabs(MPVCore::instance().playback_time - target) <= 2.0) {
-        d27Log("CMD", scene, "status=ok");
+        d27Log("CMD", scene, "seek_status=ok");
+        done();
         return;
     }
     if (attempts <= 0) {
-        d27Log("CMD", scene, "status=timeout waiting=position");
+        d27Log("CMD", scene, "status=timeout waiting=paused_position_or_seek");
         return;
     }
-    brls::delay(200, [scene, target, attempts]() {
-        d27ExpectPosition(scene, target, attempts - 1);
+    brls::delay(200, [scene, target, attempts, done]() {
+        d27ExpectPositionThen(scene, target, attempts - 1, done);
+    });
+}
+
+void d27ExpectPosition(const std::string& scene, double target, int attempts) {
+    d27ExpectPositionThen(scene, target, attempts,
+                          [scene]() { d27Log("CMD", scene, "status=ok"); });
+}
+
+void d27ExpectPausedPosition(const std::string& scene, double target,
+                             int attempts, const std::function<void()>& done) {
+    if (MPVCore::instance().isPaused() &&
+        fabs(MPVCore::instance().playback_time - target) <= 2.0) {
+        d27Log("CMD", scene, "seek_status=ok paused=1");
+        done();
+        return;
+    }
+    if (attempts <= 0) {
+        d27Log("CMD", scene, "status=timeout waiting=paused_position");
+        return;
+    }
+    brls::delay(200, [scene, target, attempts, done]() {
+        d27ExpectPausedPosition(scene, target, attempts - 1, done);
     });
 }
 
@@ -127,6 +152,50 @@ void d27ExpectQuality(const std::string& scene, int qn,
     }
     brls::delay(200, [scene, qn, oldSession, attempts, done]() {
         d27ExpectQuality(scene, qn, oldSession, attempts - 1, done);
+    });
+}
+
+bool d27NewSessionPausedInLog(const std::string& session) {
+    const char* run = getenv("SL_DEBUG_RUN_ID");
+    std::ifstream log("/tmp/wiliwili.log");
+    std::string line;
+    while (std::getline(log, line)) {
+        if (run && *run && line.find(run) == std::string::npos)
+            continue;
+        if (line.find("[session=" + session + "]") == std::string::npos)
+            continue;
+        if (line.find("SYNC_READY") != std::string::npos &&
+            line.find("phase=paused") != std::string::npos)
+            return true;
+    }
+    return false;
+}
+
+void d27ExpectQualityPaused(const std::string& scene, int qn,
+                            const std::string& oldSession, int attempts,
+                            const std::function<void()>& done) {
+    auto* playerActivity = d27CurrentPlayerActivity();
+    std::string session = wiliwili::d27::currentSession();
+    if (playerActivity && session != oldSession &&
+        playerActivity->getQualityCodeForDebug() == qn &&
+        d27NewSessionPausedInLog(session)) {
+        char detail[192];
+        snprintf(detail, sizeof(detail),
+                 "qn=%d old_session=%s new_session=%s paused=1 quality_status=ok",
+                 qn, oldSession.c_str(), session.c_str());
+        d27Log("CMD", scene, detail);
+        done();
+        return;
+    }
+    if (attempts <= 0) {
+        char detail[128];
+        snprintf(detail, sizeof(detail),
+                 "qn=%d status=timeout waiting=new_session_and_paused", qn);
+        d27Log("CMD", scene, detail);
+        return;
+    }
+    brls::delay(200, [scene, qn, oldSession, attempts, done]() {
+        d27ExpectQualityPaused(scene, qn, oldSession, attempts - 1, done);
     });
 }
 
@@ -348,6 +417,91 @@ int main(int argc, char* argv[]) {
                         return;
                     }
                     d27ExpectQuality(scene, qn, oldSession, timeout * 5, []() {});
+                });
+            } else if (scene == "pause_seek") {
+                long long targetMs = strtoll(d27Arg(args, "target_ms").c_str(), nullptr, 10);
+                if (targetMs <= 0) {
+                    d27Log("CMD", scene, "status=error missing_target_ms");
+                    return EXIT_FAILURE;
+                }
+                double target = (double)targetMs / 1000.0;
+                d27ExpectPlaying(scene, timeout * 5, [scene, target, targetMs, timeout]() {
+                    MPVCore::instance().pause();
+                    d27ExpectPaused(scene, 150, [scene, target, targetMs, timeout]() {
+                        char detail[160];
+                        snprintf(detail, sizeof(detail),
+                                 "mode=target target_ms=%lld paused=1 status=sent",
+                                 targetMs);
+                        d27Log("CMD", scene, detail);
+                        MPVCore::instance().command_async(
+                            "seek", fmt::format("{:.3f}", target), "absolute");
+                        d27ExpectPausedPosition(
+                            scene, target, timeout * 5, [scene]() {
+                                MPVCore::instance().resume();
+                                d27ExpectPlaying(scene, 150, [scene]() {
+                                    d27Log("CMD", scene, "status=ok");
+                                });
+                            });
+                    });
+                });
+            } else if (scene == "pause_quality") {
+                int qn = atoi(d27Arg(args, "qn").c_str());
+                if (qn <= 0) {
+                    d27Log("CMD", scene, "status=error missing_qn");
+                    return EXIT_FAILURE;
+                }
+                d27ExpectPlaying(scene, timeout * 5, [scene, qn, timeout]() {
+                    MPVCore::instance().pause();
+                    d27ExpectPaused(scene, 150, [scene, qn, timeout]() {
+                        auto* playerActivity = d27CurrentPlayerActivity();
+                        if (!playerActivity) {
+                            d27Log("CMD", scene, "status=error no_player_activity");
+                            return;
+                        }
+                        std::string oldSession = wiliwili::d27::currentSession();
+                        int oldQn = playerActivity->getQualityCodeForDebug();
+                        char detail[192];
+                        snprintf(detail, sizeof(detail),
+                                 "qn=%d old_qn=%d old_session=%s paused=1 status=sent",
+                                 qn, oldQn, oldSession.c_str());
+                        d27Log("CMD", scene, detail);
+                        if (!playerActivity->setQualityCodeForDebug(qn)) {
+                            d27Log("CMD", scene, "status=error invalid_qn");
+                            return;
+                        }
+                        d27ExpectQualityPaused(
+                            scene, qn, oldSession, timeout * 5, [scene]() {
+                                MPVCore::instance().resume();
+                                d27ExpectPlaying(scene, 150, [scene]() {
+                                    d27Log("CMD", scene, "status=ok");
+                                });
+                            });
+                    });
+                });
+            } else if (scene == "continuous_seek") {
+                long long firstMs = strtoll(d27Arg(args, "target_ms").c_str(), nullptr, 10);
+                long long secondMs = strtoll(d27Arg(args, "target2_ms").c_str(), nullptr, 10);
+                if (firstMs <= 0 || secondMs <= 0) {
+                    d27Log("CMD", scene, "status=error missing_target_ms_or_target2_ms");
+                    return EXIT_FAILURE;
+                }
+                double first = (double)firstMs / 1000.0;
+                double second = (double)secondMs / 1000.0;
+                d27ExpectPlaying(scene, timeout * 5,
+                                 [scene, first, second, firstMs, secondMs, timeout]() {
+                    char detail[192];
+                    snprintf(detail, sizeof(detail),
+                             "mode=continuous target_ms=%lld target2_ms=%lld status=sent",
+                             firstMs, secondMs);
+                    d27Log("CMD", scene, detail);
+                    MPVCore::instance().command_async(
+                        "seek", fmt::format("{:.3f}", first), "absolute");
+                    d27ExpectPositionThen(
+                        scene, first, timeout * 5, [scene, second, timeout]() {
+                            MPVCore::instance().command_async(
+                                "seek", fmt::format("{:.3f}", second), "absolute");
+                            d27ExpectPosition(scene, second, timeout * 5);
+                        });
                 });
             } else {
                 d27Log("CMD", scene, "status=error unknown_scene");

@@ -937,10 +937,13 @@ void MPVCore::eventMainLoop() {
                 // 移除其他备用链接
                 command_async("playlist-clear");
 
-                if (AUTO_PLAY) {
+                /* D28：暂停中切清晰度会重新 loadfile，旧 session 的 paused
+                 * 属性此时仍为 true。FILE_LOADED 不能据此自动 resume，必须
+                 * 等新 session 自己的 SL_EVT_PAUSED/SYNC_TARGET 完成后由命令恢复。 */
+                if (AUTO_PLAY && !video_paused) {
                     mpvCoreEvent.fire(MpvEventEnum::MPV_RESUME);
                     this->resume();
-                } else {
+                } else if (!video_paused) {
                     mpvCoreEvent.fire(MpvEventEnum::MPV_PAUSE);
                     this->pause();
                 }

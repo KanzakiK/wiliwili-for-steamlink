@@ -138,6 +138,8 @@ private:
     SwrContext* swr_ = nullptr;
     CSLAudioStream* stream_ = nullptr;
     int swrInputRate_ = 0;
+    int swrInputFormat_ = 0;
+    int swrInputChannels_ = 0;
 
     std::atomic<int> rate_{0};
     int frameBytes_ = 0;
