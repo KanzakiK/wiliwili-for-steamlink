@@ -24,6 +24,9 @@ int main() {
     CHECK(state.matches(7));
     CHECK(state.matches(0)); /* 旧调用者不带 epoch 时仍兼容 */
     CHECK(!state.matches(6));
+    CHECK(!state.isStaleCommand(8)); /* 新 epoch 的 seek/pause 必须进入 */
+    CHECK(state.isStaleCommand(6));  /* 旧 epoch 才丢弃 */
+    CHECK(!state.isStaleCommand(0)); /* 兼容路径 */
     CHECK(state.desiredPlay.load() == 1);
 
     state.setReady(sl::kSyncReadyVideo);
@@ -36,6 +39,8 @@ int main() {
 
     state.begin(8, 12, false);
     CHECK(!state.matches(7));
+    CHECK(state.isStaleCommand(7));
+    CHECK(!state.isStaleCommand(8));
     CHECK(state.desiredPlay.load() == 0);
     CHECK(!state.allReady());
 

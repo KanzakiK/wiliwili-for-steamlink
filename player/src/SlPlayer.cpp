@@ -313,7 +313,7 @@ struct Player::Impl {
 
     void setPaused(bool value, std::uint64_t requestId,
                    const SyncContext& sync) {
-        if (!syncState_.matches(sync.epoch)) {
+        if (syncState_.isStaleCommand(sync.epoch)) {
             syncEvent(spec_, syncState_.epoch.load(), requestId, "SYNC_STALE",
                       "reason=epoch_mismatch event_epoch=%llu",
                       (unsigned long long)sync.epoch);
@@ -349,7 +349,7 @@ struct Player::Impl {
 
     void requestSeek(double seconds, std::uint64_t requestId,
                      const SyncContext& sync) {
-        if (!syncState_.matches(sync.epoch)) {
+        if (syncState_.isStaleCommand(sync.epoch)) {
             syncEvent(spec_, syncState_.epoch.load(), requestId, "SYNC_STALE",
                       "reason=epoch_mismatch event_epoch=%llu",
                       (unsigned long long)sync.epoch);

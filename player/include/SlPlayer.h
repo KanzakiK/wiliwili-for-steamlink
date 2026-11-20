@@ -53,6 +53,13 @@ struct SyncStateTracker {
         return eventEpoch == 0 || eventEpoch == current;
     }
 
+    /* 控制命令携带的是“要切换到”的 epoch：更大的 epoch 必须接受，
+     * 只有更小的 epoch 才是迟到命令。epoch=0 是旧调用者兼容路径。 */
+    bool isStaleCommand(std::uint64_t eventEpoch) const {
+        std::uint64_t current = epoch.load();
+        return eventEpoch != 0 && current != 0 && eventEpoch < current;
+    }
+
     void setReady(unsigned bit) { readyMask.fetch_or(bit); }
     void clearReady(unsigned bit) { readyMask.fetch_and(~bit); }
     void clearAllReady() { readyMask.store(0); }
