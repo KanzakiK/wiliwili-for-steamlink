@@ -232,6 +232,10 @@ struct Player::Impl {
 
         syncState_.begin(spec.sync.epoch, spec.sync.requestId,
                          spec.sync.desiredPlay);
+        {
+            std::lock_guard<std::mutex> lock(syncTextMutex);
+            syncReason_ = spec.sync.reason;
+        }
         pendingAudioSeq_.store(0);
         pauseTargetMs_.store(spec.sync.targetMs >= 0
                                  ? (double)spec.sync.targetMs
@@ -321,6 +325,10 @@ struct Player::Impl {
         }
         syncState_.begin(sync.epoch ? sync.epoch : syncState_.epoch.load(),
                          requestId, !value);
+        {
+            std::lock_guard<std::mutex> lock(syncTextMutex);
+            syncReason_ = sync.reason;
+        }
         pendingAudioSeq_.store(0);
         pausePending_.store(false);
         lastTimelineRequestId_.store(requestId);
@@ -357,6 +365,10 @@ struct Player::Impl {
         }
         syncState_.begin(sync.epoch ? sync.epoch : syncState_.epoch.load(),
                          requestId, sync.desiredPlay);
+        {
+            std::lock_guard<std::mutex> lock(syncTextMutex);
+            syncReason_ = sync.reason;
+        }
         pendingAudioSeq_.store(0);
         pausePending_.store(false);
         lastTimelineRequestId_.store(requestId);
@@ -534,6 +546,8 @@ struct Player::Impl {
     std::atomic<std::uint64_t> lastTimelineRequestId_{0};
     std::atomic<double> pauseTargetMs_{0.0};
     std::atomic<bool> pausePending_{false};
+    std::mutex syncTextMutex;
+    std::string syncReason_;
     std::atomic<double> resumeTarget_{0.0};
     std::atomic<double> pendingSeek_{-1.0};
     std::atomic<std::uint64_t> pendingSeekId_{0};
@@ -1088,6 +1102,11 @@ void Player::Impl::run() {
     };
 
     auto logSyncReadyIfReady = [&](double presentationMs) {
+        std::string reason;
+        {
+            std::lock_guard<std::mutex> lock(syncTextMutex);
+            reason = syncReason_;
+        }
         if (syncState_.has(kSyncReadyVideo) && audioReadyForPlay())
             syncState_.setReady(kSyncReadyAudio);
         if (!syncState_.allReady() || syncReadyLogged.load())
@@ -1100,7 +1119,7 @@ void Player::Impl::run() {
                   "reason=%s",
                   syncState_.readyMask.load(), presentationMs,
                   audio_.prerollMs(),
-                  spec.sync.reason.empty() ? "-" : spec.sync.reason.c_str());
+                  reason.empty() ? "-" : reason.c_str());
     };
 
     auto logSyncStart = [&](double presentationMs, double skipMs,
@@ -1287,6 +1306,9 @@ void Player::Impl::run() {
             queueMax = 0;
             queueFlatFrames = 0;
             maxSubmittedMs = at * 1000.0;
+            audioBaseMs = at * 1000.0;
+            lastSeekTargetMs = at * 1000.0;
+            seekDisplayTargetMs = at * 1000.0;
             videoClock = at;
             resumeTarget_ = at;
             pauseFlushed_ = true;
@@ -1351,6 +1373,9 @@ void Player::Impl::run() {
             queueMax = 0;
             queueFlatFrames = 0;
             maxSubmittedMs = at * 1000.0;
+            audioBaseMs = at * 1000.0;
+            lastSeekTargetMs = at * 1000.0;
+            seekDisplayTargetMs = at * 1000.0;
             videoClock = at;
             position_ = at;
             nextDeadline = std::chrono::steady_clock::now();
