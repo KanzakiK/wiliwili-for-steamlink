@@ -1141,6 +1141,17 @@ void Player::Impl::run() {
                   queuedNow);
     };
 
+    /* 真正安排音频启动的瞬间，视频首帧和音频启动条件都已满足。
+     * epoch 快速切换时常规 ready 记录可能因 prepareEpoch 已变化而漏记，
+     * 这里强制补齐一次，保证 SYNC_START 永远不早于 SYNC_READY。 */
+    auto logSyncReadyForStart = [&](double presentationMs) {
+        if (syncReadyLogged.load())
+            return;
+        syncState_.setReady(kSyncReadyVideo);
+        syncState_.setReady(kSyncReadyAudio);
+        logSyncReadyIfReady(presentationMs);
+    };
+
     auto doAudioPrepare = [&](double target, std::uint64_t requestId,
                               bool forPlay) -> std::uint64_t {
         syncState_.clearReady(kSyncReadyAudio);
@@ -1656,7 +1667,7 @@ void Player::Impl::run() {
                                                    presentationMs, audioBaseMs,
                                                    -offsetMs, queuedNow);
                             } else {
-                                logSyncReadyIfReady(presentationMs);
+                                logSyncReadyForStart(presentationMs);
                                 logSyncStart(presentationMs, skipMs, queuedNow);
                                 audio_.scheduleStart(0, skipMs);
                                 audioScheduled = true;
@@ -1683,7 +1694,7 @@ void Player::Impl::run() {
                         double skipMs = std::max(
                             0.0, std::min(presentationMs - audioStartPositionMs, 3000.0));
                         audio_.setPaused(false);
-                        logSyncReadyIfReady(presentationMs);
+                        logSyncReadyForStart(presentationMs);
                         logSyncStart(presentationMs, skipMs, queuedNow);
                         audio_.scheduleStart(0, skipMs);
                         audioScheduled = true;

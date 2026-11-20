@@ -129,7 +129,8 @@ SESSION_STATUS="status=ok"
 if [ "$EXPECT_FAILURE" = "1" ]; then
     SESSION_STATUS="status=start"
 fi
-SESSION=$(grep -F "scene=$SCENE $SESSION_STATUS" "$RUN_DIR/wiliwili.log" 2>/dev/null |
+SESSION=$(grep -F "scene=$SCENE" "$RUN_DIR/wiliwili.log" 2>/dev/null |
+    grep -F "$SESSION_STATUS" |
     sed -n 's/.*\[session=\([^]]*\)\].*/\1/p' | grep -v '^-' | head -1)
 if [ -z "$SESSION" ]; then
     fail "场景没有有效 session"
