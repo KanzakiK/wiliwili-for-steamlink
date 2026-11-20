@@ -283,6 +283,17 @@ if grep -F "watchdog stall" "$RUN_DIR/wiliwili.log" >/dev/null 2>&1; then
             else
                 pass "自动降级无失败/超时"
             fi
+            AUTO_SENT_LINE=$(grep -nF "scene=auto_quality_downgrade reason=hard_stall" "$RUN_DIR/wiliwili.log" 2>/dev/null |
+                grep -F "status=sent" | head -1 | cut -d: -f1)
+            if [ -n "$AUTO_SENT_LINE" ]; then
+                check_pattern wiliwili.log "watchdog replay cancelled reason=" "watchdog 旧流重放已取消"
+                if awk -v n="$AUTO_SENT_LINE" 'NR > n && /replay open/ { found = 1; exit } END { exit !found }' \
+                    "$RUN_DIR/wiliwili.log"; then
+                    fail "自动降级后仍重放旧流"
+                else
+                    pass "自动降级后无旧流重放"
+                fi
+            fi
             check_pattern wiliwili.log "detail=cid=" "降级后仍有权威内容详情"
             if grep -E "content start .* qn=64 " "$RUN_DIR/wiliwili.log" >/dev/null 2>&1; then
                 pass "新 session content start qn=64"

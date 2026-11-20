@@ -107,6 +107,7 @@ struct mpv_handle {
     char socketPath[128];
     int daemonGeneration;     /* 每次成功启动 daemon 递增，防止旧状态串到新实例 */
     int watchdogKilledGeneration;
+    int suppressWatchdogReplay; /* D22: 自动降级已发起，取消本次 watchdog 旧流重放 */
     long long restartTimes[DAEMON_RESTART_MAX];
     int restartCursor;
 
@@ -846,23 +847,56 @@ static int recover_daemon_connection(mpv_handle *ctx) {
         return -1;
     }
 
+    /* watchdog 强杀恢复时，UI 可能需要一个事件循环才把自动降级决定送到
+     * compat。给一个短决策窗口，避免旧流 replay 抢先发出；非 hard 恢复不等待。 */
+    if (hasReplay && strcmp(reason, "watchdog 强杀") == 0) {
+        for (int i = 0; i < 30; ++i) {
+            int decided = 0;
+            pthread_mutex_lock(&ctx->daemonMutex);
+            decided = ctx->suppressWatchdogReplay;
+            pthread_mutex_unlock(&ctx->daemonMutex);
+            if (decided) break;
+            usleep(10 * 1000);
+        }
+    }
+
     if (hasReplay) {
         char restored[65536];
         const char *openCmd = replay;
-        if (rewrite_open_frame(replay, restored, sizeof(restored),
-                               replayGen, replayReq, pos) == 0)
-            openCmd = restored;
         pthread_mutex_lock(&ctx->daemonMutex);
-        ctx->suppressFileLoadedOnce = 1; /* 避免 wiliwili 把恢复当成新文件而自动 resume */
-        ctx->restorePausePending = expPause;
-        ctx->resumePosition = pos;
-        snprintf(ctx->lastOpenCmd, sizeof(ctx->lastOpenCmd), "%s", openCmd);
+        uint64_t currentGen = ctx->fileGeneration;
+        int suppressReplay = ctx->suppressWatchdogReplay;
+        int newerLoadfile = currentGen != replayGen;
+        if (suppressReplay || newerLoadfile) {
+            ctx->suppressWatchdogReplay = 0;
+            /* 新 loadfile 已经改写快照时保留它；只清掉旧代次的 replay 快照。 */
+            if (!newerLoadfile) {
+                ctx->hasLastOpen = 0;
+                ctx->lastOpenCmd[0] = '\0';
+            }
+        }
         pthread_mutex_unlock(&ctx->daemonMutex);
-        d27_log(ctx, "COMPAT", replayGen, replayReq,
-                "replay open pos=%.3f pause=%d status=sent", pos, expPause);
-        if (send_session_meta_and_open(ctx, replayGen, replayReq, openCmd) != MPV_ERROR_SUCCESS)
+
+        if (suppressReplay || newerLoadfile) {
             d27_log(ctx, "COMPAT", replayGen, replayReq,
-                    "replay open status=error");
+                    "watchdog replay cancelled reason=%s",
+                    suppressReplay ? "auto_quality_downgrade" : "newer_loadfile");
+        } else {
+            if (rewrite_open_frame(replay, restored, sizeof(restored),
+                                   replayGen, replayReq, pos) == 0)
+                openCmd = restored;
+            pthread_mutex_lock(&ctx->daemonMutex);
+            ctx->suppressFileLoadedOnce = 1; /* 避免 wiliwili 把恢复当成新文件而自动 resume */
+            ctx->restorePausePending = expPause;
+            ctx->resumePosition = pos;
+            snprintf(ctx->lastOpenCmd, sizeof(ctx->lastOpenCmd), "%s", openCmd);
+            pthread_mutex_unlock(&ctx->daemonMutex);
+            d27_log(ctx, "COMPAT", replayGen, replayReq,
+                    "replay open pos=%.3f pause=%d status=sent", pos, expPause);
+            if (send_session_meta_and_open(ctx, replayGen, replayReq, openCmd) != MPV_ERROR_SUCCESS)
+                d27_log(ctx, "COMPAT", replayGen, replayReq,
+                        "replay open status=error");
+        }
     }
     fire_wakeup(ctx);
     return 0;
@@ -1651,6 +1685,7 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
         ctx->expectedPause = 0;
         ctx->restorePausePending = 0;
         ctx->suppressFileLoadedOnce = 0;
+        ctx->suppressWatchdogReplay = 0;
         ctx->resumePosition = open_cmd_start(frame);
         ctx->initialSeekTarget = ctx->resumePosition;
         ctx->hasInitialSeekTarget = ctx->initialSeekTarget > 0.0;
@@ -1682,6 +1717,22 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
     if (strcmp(cmd, "set") == 0) {
         const char *prop = args[1] ? args[1] : "";
         const char *val = args[2] ? args[2] : "";
+        if (strcmp(prop, "sl-health-auto-downgrade") == 0) {
+            int enabled = strcmp(val, "yes") == 0 || strcmp(val, "true") == 0 ||
+                          strcmp(val, "1") == 0;
+            pthread_mutex_lock(&ctx->daemonMutex);
+            ctx->suppressWatchdogReplay = enabled ? 1 : 0;
+            pthread_mutex_unlock(&ctx->daemonMutex);
+            uint64_t gen = 0, req = 0;
+            pthread_mutex_lock(&ctx->daemonMutex);
+            gen = ctx->fileGeneration;
+            req = ctx->lastCommandReq;
+            pthread_mutex_unlock(&ctx->daemonMutex);
+            d27_log(ctx, "CMD", gen, req,
+                    "set sl-health-auto-downgrade=%s status=sent",
+                    enabled ? "yes" : "no");
+            return MPV_ERROR_SUCCESS;
+        }
         if (strcmp(prop, "pause") == 0) {
             int yes = strcmp(val, "yes") == 0 || strcmp(val, "true") == 0 || strcmp(val, "1") == 0;
             /* 先更新期望态：daemon 若在事件上报前被杀，恢复时仍能让 UI 按钮一致。 */

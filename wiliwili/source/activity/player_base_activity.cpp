@@ -540,6 +540,8 @@ bool BasePlayerActivity::autoDowngradeForHardStall() {
              fromQn, kTargetQn, autoDowngradeOldSession.c_str());
     wiliwili::d27::log("CMD", detail);
 
+    // 通知 compat：watchdog 恢复时不要再重放旧 qn 流，qn=64 新 open 即将到达。
+    MPVCore::instance().command_async("set", "sl-health-auto-downgrade", "yes");
     this->updateVideoLink();
 
     ASYNC_RETAIN
