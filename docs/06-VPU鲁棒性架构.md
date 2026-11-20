@@ -129,7 +129,7 @@ playing=true
 - 仅在 compat 判定的 `hard + no_frame` 路径触发；`no_heartbeat` 和 `worker_dead` 仍只走 watchdog 的进程恢复。
 - 仅当前 qn 为 80/112/116、且当前 `accept_quality` 包含 64 时，BasePlayerActivity 通过 `updateVideoLink()` 把当前内容切到 qn=64；720P 及以下不再继续降，每个内容只触发一次。
 - 覆盖只存在当前播放页实例：不写 `SettingItem::VIDEO_QUALITY`、不改静态 `defaultQuality`；换视频或用户手动选清晰度后立即清除。
-- watchdog 仍负责强杀并恢复 daemon；自动降级与新 open 的竞态由 generation 和 request id 串联，日志使用 `scene=auto_quality_downgrade reason=hard_stall` 记录 sent/ok/error、旧/新 session。`status=ok` 只在新流真实 `playback start` 后写；60 秒未起播或播放错误写 `status=error`，并回退通用硬提示。
+- watchdog 仍负责 SIGKILL 并启动新 daemon，但自动降级时不再重放旧 qn 流：compat 等一个短 UI 决策窗口，若新 qn=64 loadfile 已到达或标记已置，则写 `watchdog replay cancelled` 并跳过 replay，避免旧流与新流交错 open。自动降级与新 open 的竞态仍由 generation 和 request id 串联，日志使用 `scene=auto_quality_downgrade reason=hard_stall` 记录 sent/ok/error、旧/新 session。`status=ok` 只在新流真实 `playback start` 后写；60 秒未起播或播放错误写 `status=error`，并回退通用硬提示。
 
 ### 5. 父进程死亡清理
 
