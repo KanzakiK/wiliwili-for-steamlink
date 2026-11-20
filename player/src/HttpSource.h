@@ -46,7 +46,7 @@ public:
 
     int64_t downloadedBytes() const;
     size_t bufferedBytes() const;
-    long contentLength() const;
+    int64_t contentLength() const;
     int64_t readPosition() const;
     int64_t baseOffset() const;
     int64_t lastNetworkErrorMs() const { return lastNetworkErrorMs_.load(); }

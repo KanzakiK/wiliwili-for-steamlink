@@ -1641,8 +1641,11 @@ static void *rx_thread(void *arg) {
                         "ignore FrameSubmitStalled, keep watchdog active");
                 continue;
             }
+            /* D22 升档失败测试需要让 error 到达 UI，跳过同清晰度备用源恢复；
+             * 该开关只在 debug run 存在时生效。 */
+            bool suppressFailover = debugFaultEnabled("SL_DEBUG_FAIL_QUALITY_START");
             /* 主源失败先试备用源；全失败才向 wiliwili 报 END_FILE(ERROR) */
-            if (try_failover(ctx)) {
+            if (!suppressFailover && try_failover(ctx)) {
                 fire_wakeup(ctx);
                 continue;
             }

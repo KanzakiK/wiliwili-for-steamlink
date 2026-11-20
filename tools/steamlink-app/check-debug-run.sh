@@ -62,8 +62,9 @@ NO_AUDIO=$(sed -n 's/^no_audio=//p' "$RUN_DIR/manifest.txt" 2>/dev/null | head -
 FORCE_FAILOVER=$(sed -n 's/^force_failover=//p' "$RUN_DIR/manifest.txt" 2>/dev/null | head -1)
 FORCE_WATCHDOG=$(sed -n 's/^force_watchdog=//p' "$RUN_DIR/manifest.txt" 2>/dev/null | head -1)
 PRIMARY_ERROR=$(sed -n 's/^primary_error=//p' "$RUN_DIR/manifest.txt" 2>/dev/null | head -1)
+FAIL_QUALITY_START=$(sed -n 's/^fail_quality_start=//p' "$RUN_DIR/manifest.txt" 2>/dev/null | head -1)
 EXPECT_FAILURE=0
-if [ "$FAIL_AUDIO_SEEK" = "1" ] || [ "$FAIL_AUDIO_CREATE" = "1" ]; then
+if [ "$FAIL_AUDIO_SEEK" = "1" ] || [ "$FAIL_AUDIO_CREATE" = "1" ] || [ "$FAIL_QUALITY_START" = "1" ]; then
     EXPECT_FAILURE=1
 fi
 if [ -z "$RUN_ID" ]; then
@@ -83,7 +84,7 @@ for key in created_at collected_at archive_size_bytes; do
         fail "manifest 缺少 $key"
     fi
 done
-for key in no_audio fail_audio_seek fail_audio_create force_failover force_watchdog primary_error; do
+for key in no_audio fail_audio_seek fail_audio_create force_failover force_watchdog primary_error fail_quality_start; do
     if grep -q "^$key=" "$RUN_DIR/manifest.txt" 2>/dev/null; then
         pass "manifest 含 $key"
     else
@@ -240,16 +241,20 @@ else
                         fail "quality_change 缺少 qn"
                     else
                         check_both wiliwili.log "[run=$RUN_ID]" "scene=quality_change qn=$REQUESTED_QN old_qn=" "quality qn 请求"
-                        check_both wiliwili.log "$PREFIX" "scene=quality_change qn=$REQUESTED_QN old_session=" "quality 新 session 完成"
-                        OLD_SESSION=$(grep -F "scene=quality_change qn=$REQUESTED_QN" "$RUN_DIR/wiliwili.log" 2>/dev/null |
-                            grep -F "status=sent" | sed -n 's/.* old_session=\([^ ]*\).*/\1/p' | head -1)
-                        if [ -z "$OLD_SESSION" ]; then
-                            fail "quality_change 缺少旧 session"
-                        elif [ "$OLD_SESSION" = "$SESSION" ]; then
-                            fail "quality_change 未创建新 session"
+                        if [ "$FAIL_QUALITY_START" = "1" ]; then
+                            pass "升档失败 run 跳过原档位完成判据，改验自动降级"
                         else
-                            pass "quality_change 旧 session=$OLD_SESSION，新 session=$SESSION"
-                            check_both wiliwili.log "[run=$RUN_ID][session=$OLD_SESSION]" "content start" "旧 session content start"
+                            check_both wiliwili.log "$PREFIX" "scene=quality_change qn=$REQUESTED_QN old_session=" "quality 新 session 完成"
+                            OLD_SESSION=$(grep -F "scene=quality_change qn=$REQUESTED_QN" "$RUN_DIR/wiliwili.log" 2>/dev/null |
+                                grep -F "status=sent" | sed -n 's/.* old_session=\([^ ]*\).*/\1/p' | head -1)
+                            if [ -z "$OLD_SESSION" ]; then
+                                fail "quality_change 缺少旧 session"
+                            elif [ "$OLD_SESSION" = "$SESSION" ]; then
+                                fail "quality_change 未创建新 session"
+                            else
+                                pass "quality_change 旧 session=$OLD_SESSION，新 session=$SESSION"
+                                check_both wiliwili.log "[run=$RUN_ID][session=$OLD_SESSION]" "content start" "旧 session content start"
+                            fi
                         fi
                         if [ -n "$UI_QN" ] && [ "$UI_QN" = "$REQUESTED_QN" ]; then
                             pass "新 session qn=$UI_QN 与请求一致"
@@ -528,6 +533,31 @@ if [ "$FORCE_WATCHDOG" = "1" ]; then
     check_pattern wiliwili.log "status=error reason=watchdog" "旧 epoch error 终态"
     check_pattern wiliwili.log "replay open pos=" "新 daemon replay"
     check_pattern wiliwili.log "reason=watchdog_replay" "replay 新 epoch"
+fi
+
+if [ "$FAIL_QUALITY_START" = "1" ]; then
+    check_pattern wiliwili.log "debug fault quality start failed" "升档起播失败注入"
+    check_pattern wiliwili.log "error message=debug fault quality start failed" "daemon 上报升档失败"
+    if grep -E "scene=auto_quality_downgrade reason=quality_change_failure from_qn=(80|112|116) to_qn=64 old_session=" "$RUN_DIR/wiliwili.log" >/dev/null 2>&1; then
+        pass "升档失败自动降级请求"
+    else
+        fail "升档失败自动降级请求"
+    fi
+    if grep -E "scene=auto_quality_downgrade reason=quality_change_failure from_qn=(80|112|116) to_qn=64" "$RUN_DIR/wiliwili.log" | grep -F "status=ok" >/dev/null 2>&1; then
+        pass "升档失败自动降级完成"
+    else
+        fail "升档失败自动降级完成"
+    fi
+    if grep -E "content start .* qn=64 " "$RUN_DIR/wiliwili.log" >/dev/null 2>&1; then
+        pass "降级后新 session qn=64"
+    else
+        fail "降级后新 session 未记录 qn=64"
+    fi
+    if grep -F "[PLAYER]" "$RUN_DIR/wiliwili.log" | grep -F "debug fault quality start failed" | wc -l | grep -q '^1$'; then
+        pass "升档失败注入只触发一次"
+    else
+        fail "升档失败注入触发次数不为 1"
+    fi
 fi
 
 if [ "$FAILURES" -eq 0 ]; then

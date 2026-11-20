@@ -40,6 +40,8 @@ static bool debugFaultEnabled(const char* name) {
 }
 
 static std::atomic<bool> gPrimaryErrorInjected{false};
+static std::atomic<bool> gQualityStartFaultInjected{false};
+static std::atomic<int> gOpenCount{0};
 
 constexpr unsigned kVideoQueueMaxMs = 4000;
 constexpr double kSyncPrerollMs = 50.0;
@@ -232,6 +234,7 @@ struct Player::Impl {
         vpuLog("open: stop previous player");
         stop();
         vpuLog("open: previous player stopped");
+    ++gOpenCount;
         lastFrameTimeMs_.store(0);
         if (spec.videoUrl.empty())
             return false;
@@ -786,6 +789,15 @@ void Player::Impl::run() {
 
     if (!videoSource_.open(spec.videoUrl, spec.referrer, userAgent())) {
         fail("视频源打开失败: " + videoSource_.error());
+        return;
+    }
+
+    /* D22 测试点：模拟手动升档后新流在首帧前失败，每进程只触发一次，
+     * 这样自动降级到 qn=64 的新 open 必须能正常起播。 */
+    if (gOpenCount.load() >= 2 && debugFaultEnabled("SL_DEBUG_FAIL_QUALITY_START") &&
+        !gQualityStartFaultInjected.exchange(true)) {
+        sl::d27Log("PLAYER", "debug fault quality start failed");
+        fail("debug fault quality start failed");
         return;
     }
 

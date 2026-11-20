@@ -380,9 +380,13 @@ void BasePlayerActivity::setCommonData() {
                 this->updateVideoLink();
                 break;
             case MpvEventEnum::LOADING_END:
+                this->manualQualityChangePending = false;
                 this->completeAutoDowngradeIfPlaying();
                 break;
             case MpvEventEnum::MPV_FILE_ERROR:
+                if (this->autoDowngradeForQualityChangeFailure())
+                    break;
+                this->manualQualityChangePending = false;
                 this->failAutoDowngrade("playback_error");
                 break;
             default:
@@ -504,9 +508,13 @@ void BasePlayerActivity::resetSessionQualityOverride() {
     sessionQualityOverride          = 0;
     sessionQualityContentKey.clear();
     hardAutoDowngradeApplied        = false;
+    manualQualityChangePending      = false;
+    manualQualityFromQn             = 0;
+    manualQualityContentKey.clear();
     autoDowngradePending            = false;
     autoDowngradeFromQn             = 0;
     autoDowngradeToQn               = 0;
+    autoDowngradeReason             = "hard_stall";
     autoDowngradeNewSession.clear();
     autoDowngradeOldSession.clear();
     ++autoDowngradeRequestSeq;
@@ -535,6 +543,7 @@ bool BasePlayerActivity::autoDowngradeForHardStall() {
     autoDowngradePending       = true;
     autoDowngradeFromQn        = fromQn;
     autoDowngradeToQn          = kTargetQn;
+    autoDowngradeReason        = "hard_stall";
     autoDowngradeNewSession.clear();
     autoDowngradeOldSession    = wiliwili::d27::currentSession();
     uint64_t requestSeq        = ++autoDowngradeRequestSeq;
@@ -559,6 +568,55 @@ bool BasePlayerActivity::autoDowngradeForHardStall() {
     return true;
 }
 
+bool BasePlayerActivity::autoDowngradeForQualityChangeFailure() {
+    if (!activityShown || !manualQualityChangePending) return false;
+    if (manualQualityContentKey != currentContentKey()) return false;
+    if (videoUrlResult.accept_quality.empty()) return false;
+
+    int fromQn = videoUrlResult.quality;
+    if (fromQn != 80 && fromQn != 112 && fromQn != 116) return false;
+    constexpr int kTargetQn = 64;
+    bool targetAvailable = false;
+    for (int q : videoUrlResult.accept_quality) {
+        if (q == kTargetQn) {
+            targetAvailable = true;
+            break;
+        }
+    }
+    if (!targetAvailable) return false;
+
+    manualQualityChangePending = false;
+    int sourceQn = manualQualityFromQn > 0 ? manualQualityFromQn : fromQn;
+    hardAutoDowngradeApplied   = true;
+    sessionQualityOverride     = kTargetQn;
+    sessionQualityContentKey   = currentContentKey();
+    autoDowngradePending       = true;
+    autoDowngradeFromQn        = sourceQn;
+    autoDowngradeToQn          = kTargetQn;
+    autoDowngradeReason        = "quality_change_failure";
+    autoDowngradeNewSession.clear();
+    autoDowngradeOldSession    = wiliwili::d27::currentSession();
+    uint64_t requestSeq        = ++autoDowngradeRequestSeq;
+
+    char detail[320];
+    snprintf(detail, sizeof(detail),
+             "scene=auto_quality_downgrade reason=quality_change_failure "
+             "from_qn=%d to_qn=%d old_session=%s status=sent",
+             fromQn, kTargetQn, autoDowngradeOldSession.c_str());
+    wiliwili::d27::log("CMD", detail);
+
+    MPVCore::instance().command_async("set", "sl-health-auto-downgrade", "yes");
+    this->updateVideoLink();
+
+    ASYNC_RETAIN
+    brls::delay(60000, [ASYNC_TOKEN, this, requestSeq]() {
+        ASYNC_RELEASE
+        if (autoDowngradePending && autoDowngradeRequestSeq == requestSeq)
+            failAutoDowngrade("playback_timeout");
+    });
+    return true;
+}
+
 void BasePlayerActivity::completeAutoDowngradeIfPlaying() {
     if (!autoDowngradePending || !activityShown) return;
     if (videoUrlResult.quality != autoDowngradeToQn) return;
@@ -569,9 +627,9 @@ void BasePlayerActivity::completeAutoDowngradeIfPlaying() {
 
     char detail[320];
     snprintf(detail, sizeof(detail),
-             "scene=auto_quality_downgrade reason=hard_stall from_qn=%d to_qn=%d "
+             "scene=auto_quality_downgrade reason=%s from_qn=%d to_qn=%d "
              "old_session=%s new_session=%s status=ok",
-             autoDowngradeFromQn, autoDowngradeToQn,
+             autoDowngradeReason.c_str(), autoDowngradeFromQn, autoDowngradeToQn,
              autoDowngradeOldSession.c_str(), session.c_str());
     wiliwili::d27::log("CMD", detail);
     autoDowngradePending = false;
@@ -588,9 +646,9 @@ void BasePlayerActivity::failAutoDowngrade(const char* reason) {
 
     char detail[256];
     snprintf(detail, sizeof(detail),
-             "scene=auto_quality_downgrade reason=hard_stall from_qn=%d to_qn=%d "
+             "scene=auto_quality_downgrade reason=%s from_qn=%d to_qn=%d "
              "old_session=%s status=error failure=%s",
-             autoDowngradeFromQn, autoDowngradeToQn,
+             autoDowngradeReason.c_str(), autoDowngradeFromQn, autoDowngradeToQn,
              autoDowngradeOldSession.c_str(), reason);
     wiliwili::d27::log("CMD", detail);
     autoDowngradePending = false;
@@ -639,6 +697,10 @@ void BasePlayerActivity::setVideoQuality() {
 
             sessionQualityOverride = 0;
             sessionQualityContentKey.clear();
+            hardAutoDowngradeApplied      = false;
+            manualQualityChangePending    = code > videoUrlResult.quality;
+            manualQualityFromQn           = videoUrlResult.quality;
+            manualQualityContentKey       = currentContentKey();
             autoDowngradePending = false;
             this->updateVideoLink();
         },
@@ -687,6 +749,10 @@ bool BasePlayerActivity::setQualityCodeForDebug(int qn) {
 
     sessionQualityOverride = 0;
     sessionQualityContentKey.clear();
+    hardAutoDowngradeApplied      = false;
+    manualQualityChangePending    = (qn == 80 || qn == 112 || qn == 116);
+    manualQualityFromQn           = videoUrlResult.quality;
+    manualQualityContentKey       = currentContentKey();
     autoDowngradePending = false;
     this->updateVideoLink();
     return true;

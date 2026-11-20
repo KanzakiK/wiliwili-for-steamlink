@@ -260,14 +260,14 @@ private:
             /* Range 响应的 Content-Length 是剩余长度，不是整片长度。 */
             std::lock_guard<std::mutex> lock(self->mutex_);
             if (self->rangeStart_ <= 0) {
-                long length = atol(ptr + 15);
+                int64_t length = strtoll(ptr + 15, nullptr, 10);
                 if (length > 0)
                     self->contentLength_ = length;
             }
         } else if (bytes > 14 && strncasecmp(ptr, "Content-Range:", 14) == 0) {
             /* bytes 12345-99999/100000 -> 总长度取 '/' 后面的数字。 */
             const char* slash = strrchr(ptr, '/');
-            long total = slash ? atol(slash + 1) : 0;
+            int64_t total = slash ? strtoll(slash + 1, nullptr, 10) : 0;
             if (total > 0) {
                 std::lock_guard<std::mutex> lock(self->mutex_);
                 self->contentLength_ = total;
@@ -472,7 +472,7 @@ private:
     int64_t endOffset_ = 0;
     int64_t readPos_ = 0;
     size_t totalBytes_ = 0;
-    long contentLength_ = 0;
+    int64_t contentLength_ = 0;
     int64_t rangeStart_ = 0; /* >0 表示当前下载是 Range 请求，Content-Length 不能当总长 */
     bool eof_ = false;
     bool error_ = false;
@@ -622,7 +622,7 @@ size_t HttpSource::bufferedBytes() const {
     return downloader ? downloader->buffered() : 0;
 }
 
-long HttpSource::contentLength() const {
+int64_t HttpSource::contentLength() const {
     auto downloader = this->downloader();
     return downloader ? downloader->contentLength() : 0;
 }
@@ -653,7 +653,7 @@ int64_t HttpSource::seekCallback(void* opaque, int64_t offset, int whence) {
             std::lock_guard<std::mutex> lock(self->seekHintMutex_);
             if (self->seekHintActive_) seconds = self->pendingSeekSeconds_;
         }
-        long length = downloader->contentLength();
+        int64_t length = downloader->contentLength();
         double duration = self->format_ && self->format_->duration > 0
                               ? (double)self->format_->duration / AV_TIME_BASE
                               : 0.0;
@@ -665,8 +665,8 @@ int64_t HttpSource::seekCallback(void* opaque, int64_t offset, int whence) {
             if (ratio < 0.0) ratio = 0.0;
             if (ratio > 1.0) ratio = 1.0;
             int64_t mapped = (int64_t)((double)length * ratio);
-            sl::d27Log("HTTP", "seek time hint %.3f/%.3fs -> %lld/%ld",
-                       seconds, duration, (long long)mapped, length);
+            sl::d27Log("HTTP", "seek time hint %.3f/%.3fs -> %lld/%lld",
+                       seconds, duration, (long long)mapped, (long long)length);
             return downloader->seek(mapped, whence);
         }
     }
