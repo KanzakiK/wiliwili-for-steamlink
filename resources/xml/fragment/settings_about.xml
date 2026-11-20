@@ -21,10 +21,10 @@
                 alignItems="flexEnd"
                 marginBottom="@style/wiliwili/margin/20">
             <brls:Label
-                    fontSize="60"
+                    fontSize="46"
                     marginRight="10"
                     lineHeight="1"
-                    text="wiliwili"/>
+                    text="wiliwili for Steam Link"/>
             <brls:Label
                     id="setting/about/version"
                     marginRight="20"
@@ -90,7 +90,7 @@
                 width="@style/wiliwili/about/qr"
                 height="@style/wiliwili/about/qr"
                 cornerRadius="6"
-                QRContent="https://github.com/xfangfang/wiliwili"/>
+                QRContent="https://github.com/KanzakiK/wiliwili-for-steamlink"/>
         <brls:Label
                 marginTop="10"
                 textColor="@theme/font/grey"

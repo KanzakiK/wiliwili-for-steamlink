@@ -1,7 +1,7 @@
 {
   "title": "喴哩喴哩",
-  "github": "https://github.com/xfangfang/wiliwili",
-  "github_release": "https://github.com/xfangfang/wiliwili/releases/latest",
+  "github": "https://github.com/KanzakiK/wiliwili-for-steamlink",
+  "github_release": "https://github.com/KanzakiK/wiliwili-for-steamlink/releases/latest",
   "setting": {
     "quit_hint": "设置的内容将在下次启动后生效",
     "app": {
@@ -137,7 +137,7 @@
       "tab": "关于更多",
       "brief_header": "软件介绍",
       "repository": "项目首页",
-      "brief": "专为手柄控制设计的第三方跨平台B站客户端\n完美复刻官方PC端B站，满足日常使用, 目前可以运行在PC全平台、PSV、PS4 和 Nintendo Switch 上",
+    "brief": "基于 wiliwili 的 Steam Link 移植版\n使用 SLVideo 硬解与 SLAudio 输出，适配 Steam Link 的手柄操作与硬件能力",
       "repo_header": "开源地址",
       "author_header": "作者发言",
       "author": "一直想做个艺术家, 可惜程序员都没什么发挥的空间\n直到这个作品诞生，实现了：「在游戏机上看视频；用手机来玩游戏」\n或许算得上是一种行为艺术，这样的话我也就圆满了"

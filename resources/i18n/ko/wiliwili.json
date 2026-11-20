@@ -1,7 +1,7 @@
 {
   "title": "wiliwili",
-  "github": "https://github.com/xfangfang/wiliwili",
-  "github_release": "https://github.com/xfangfang/wiliwili/releases/latest",
+  "github": "https://github.com/KanzakiK/wiliwili-for-steamlink",
+  "github_release": "https://github.com/KanzakiK/wiliwili-for-steamlink/releases/latest",
   "setting": {
     "quit_hint": "응용 프로그램을 종료하려고 합니다. 다음 시작 후에 설정이 적용됩니다.",
     "app": {
