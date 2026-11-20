@@ -88,13 +88,13 @@ Dirty Flag 语义：
 - 30 秒内最多自动重启 3 次，避免 fork 风暴。
 - 新 daemon 从启动到首帧期间挂起 watchdog，避免慢开流误判。
 
-### 4. D22 软卡顿检测与提示
+### 4. 播放卡顿检测与提示
 
 D22 与 watchdog 分层：
 
-- watchdog 只判定硬故障：无心跳、worker 退出、长时间无新帧，继续 SIGKILL + 重启 daemon。
-- D22 只判定软卡顿：仍在持续喂帧，但呈现位置长期不推进或推进断续；命中后发一次播放页提示，不触发进程重启。
-- 两者复用 compat 的 500ms heartbeat 轮询，但判据和动作分开；不新增高频线程，`frameAge` 到达硬 watchdog 阈值时不发 D22 提示，避免重复抢判。
+- watchdog 继续判定硬故障：无心跳、worker 退出、长时间无新帧，执行 SIGKILL + 重启 daemon。
+- D22 判定软卡顿：仍在持续喂帧，但呈现位置长期不推进或推进断续；不触发进程重启。
+- 软/硬两条路径复用 compat 的 500ms heartbeat 轮询和同一个播放页提示出口，但判据与后续动作分开；不新增高频线程。硬路径在 watchdog 强杀前发提示，软路径因 `frameAge` 已到硬故障阈值而不重复抢判。
 
 heartbeat 扩展字段：
 
@@ -116,9 +116,10 @@ playing=true
 
 动作边界：
 
-- compat 发出一次性健康事件，映射到播放页 `VideoView::HINT`。
-- 提示文案固定为“播放不流畅，可尝试切换到 720P”。
-- 每个 generation/session 只提示一次；新文件、用户切清晰度或 watchdog 重启后重置。
+- compat 发出一次性健康事件，reason 为 `soft` 或 `hard`，映射到播放页 `VideoView::HINT`。
+- 文案前半段区分原因、后半段统一：soft 为“播放不流畅，可尝试降低清晰度”；hard 为“播放卡顿，已尝试自动恢复，可尝试降低清晰度”。
+- watchdog 恢复清队列时保留健康提示事件，防止 Toast 在交付前被丢弃。
+- 每个 generation 只提示一次；新文件、用户切清晰度或 watchdog 重启后重置。
 - 不调用 `updateVideoLink()`，不改 `SettingItem::VIDEO_QUALITY`，不自动重开当前播放。
 - 如果当前已是 720P 或没有低档，仍只提示一次，不做重复动作。
 
