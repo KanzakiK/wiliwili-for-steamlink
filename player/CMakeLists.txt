@@ -62,7 +62,8 @@ target_include_directories(compat_session_test PRIVATE
     include
     $ENV{HOME}/mpv-stub/include)
 target_compile_options(compat_session_test PRIVATE -Wall -Wextra -D_DEFAULT_SOURCE)
-target_link_libraries(compat_session_test PRIVATE pthread)
+target_compile_definitions(compat_session_test PRIVATE SL_D28_TEST_HOOKS)
+target_link_libraries(compat_session_test PRIVATE pthread m)
 
 # 已封存的旧兼容层验证程序：只保留源码备查，默认不构建。
 # 它不能可靠反映音视频同步，禁止作为同步回归入口；新回归应基于真实 wiliwili 播放页。

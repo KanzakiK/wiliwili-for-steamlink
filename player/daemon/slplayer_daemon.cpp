@@ -49,6 +49,9 @@ std::atomic<std::uint64_t> g_fileGeneration{0};
  * watchdog 回放同一 open 时复用已保存的 meta。 */
 std::mutex g_sessionMetaMutex;
 std::map<std::uint64_t, sl_session_meta_t> g_sessionMeta;
+/* D28：只有一个 pending sync context，按 (gen, req) 一次性消费。 */
+std::mutex g_syncContextMutex;
+sl_sync_context_t g_pendingSync = {};
 
 static const char* dash(const char* value) { return value && *value ? value : "-"; }
 
@@ -103,6 +106,41 @@ static void daemonLogContext(const sl::DebugLogContext& context,
     vsnprintf(message, sizeof(message), fmt, args);
     va_end(args);
     sl::d27LogContext("DAEMON", context, "%s", message);
+}
+
+static bool consumeSyncContext(std::uint64_t gen, std::uint64_t req,
+                               const sl::DebugLogContext& context,
+                               sl_sync_meta_t* out) {
+    sl_sync_context_t snapshot = {};
+    sl_sync_meta_t consumed = {};
+    int mismatch = 0;
+    int ok = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_syncContextMutex);
+        snapshot = g_pendingSync;
+        ok = sl_sync_context_consume(&g_pendingSync, gen, req, &consumed,
+                                     &mismatch);
+    }
+    if (ok) {
+        if (out) *out = consumed;
+        daemonLogContext(context,
+                         "sync meta consumed epoch=%llu target_ms=%lld "
+                         "reason=%s desired=%s",
+                         (unsigned long long)consumed.epoch,
+                         (long long)consumed.target_ms, consumed.reason,
+                         consumed.desired);
+        return true;
+    }
+    if (mismatch && snapshot.valid) {
+        daemonLogContext(context,
+                         "sync meta discarded reason=identity_mismatch "
+                         "pending_gen=%llu pending_req=%llu "
+                         "command_gen=%llu command_req=%llu",
+                         (unsigned long long)snapshot.generation,
+                         (unsigned long long)snapshot.requestId,
+                         (unsigned long long)gen, (unsigned long long)req);
+    }
+    return false;
 }
 
 static void storeSessionMeta(std::uint64_t gen, const sl_session_meta_t& meta) {
@@ -433,8 +471,9 @@ int main(int argc, char** argv) {
 
         if (cmd == SL_CMD_META) {
             /* meta<TAB>gen<TAB>req<TAB>run=...<TAB>session=...<TAB>content=...
-             * <TAB>id=...<TAB>bv=...<TAB>cid=...<TAB>qn=... */
-            if (f.size() < 7) {
+             * <TAB>id=...<TAB>bv=...<TAB>cid=...<TAB>qn=...
+             * 可追加 epoch/target_ms/reason/desired；两类 meta 独立解析。 */
+            if (f.size() < 5) {
                 daemonLog("bad meta command");
                 continue;
             }
@@ -446,17 +485,42 @@ int main(int argc, char** argv) {
                 kv += f[i];
             }
             sl_session_meta_t meta;
-            int rc = sl_session_meta_parse_kv_list(kv.c_str(), SL_IPC_FIELD_SEP, &meta);
-            if (rc != 1) {
+            int sessionRc = sl_session_meta_parse_kv_list(
+                kv.c_str(), SL_IPC_FIELD_SEP, &meta);
+            sl_sync_meta_t syncMeta;
+            int syncRc = sl_sync_meta_parse_kv_list(kv.c_str(),
+                                                   SL_IPC_FIELD_SEP, &syncMeta);
+            if (sessionRc < 0 || syncRc < 0 ||
+                (sessionRc != 1 && syncRc != 1)) {
                 sl::DebugLogContext context;
                 context.generation = gen;
                 context.requestId = req;
-                daemonLogContext(context, "bad meta fields rc=%d", rc);
+                daemonLogContext(context,
+                                 "bad meta fields session_rc=%d sync_rc=%d",
+                                 sessionRc, syncRc);
                 continue;
             }
-            storeSessionMeta(gen, meta);
-            daemonLogContext(debugContextFromMeta(gen, meta, req),
-                             "meta ok %s", metaIdentity(meta).c_str());
+            sl::DebugLogContext context;
+            context.generation = gen;
+            context.requestId = req;
+            if (sessionRc == 1) {
+                storeSessionMeta(gen, meta);
+                context = debugContextFromMeta(gen, meta, req);
+                daemonLogContext(context, "meta ok %s",
+                                 metaIdentity(meta).c_str());
+            }
+            if (syncRc == 1) {
+                {
+                    std::lock_guard<std::mutex> lock(g_syncContextMutex);
+                    sl_sync_context_set(&g_pendingSync, gen, req, &syncMeta);
+                }
+                daemonLogContext(context,
+                                 "sync meta pending epoch=%llu target_ms=%lld "
+                                 "reason=%s desired=%s",
+                                 (unsigned long long)syncMeta.epoch,
+                                 (long long)syncMeta.target_ms, syncMeta.reason,
+                                 syncMeta.desired);
+            }
             continue;
         }
 
@@ -477,6 +541,8 @@ int main(int argc, char** argv) {
                 context.generation = fileGen;
                 context.requestId = requestId;
             }
+            sl_sync_meta_t openSync;
+            (void)consumeSyncContext(fileGen, requestId, context, &openSync);
             sl::setDebugLogContext(context);
             std::lock_guard<std::mutex> lock(playerMutex);
             daemonLogReq(requestId, "open enter opened=%d", opened ? 1 : 0);
@@ -503,27 +569,39 @@ int main(int argc, char** argv) {
             player.play(0);
         } else if (cmd == SL_CMD_PAUSE) {
             std::uint64_t req = parseUnsigned(f[2]);
+            std::uint64_t gen = parseUnsigned(f[1]);
+            sl::DebugLogContext context = sl::currentDebugLogContext();
+            context.generation = gen;
+            context.requestId = req;
+            sl_sync_meta_t pauseSync;
+            (void)consumeSyncContext(gen, req, context, &pauseSync);
             if (commandGenerationMatches(f) && opened) {
-                sl::DebugLogContext context = sl::currentDebugLogContext();
-                context.requestId = req;
                 sl::setDebugLogContext(context);
                 daemonLogReq(req, "pause status=sent");
                 player.pause(req);
             }
         } else if (cmd == SL_CMD_RESUME) {
             std::uint64_t req = parseUnsigned(f[2]);
+            std::uint64_t gen = parseUnsigned(f[1]);
+            sl::DebugLogContext context = sl::currentDebugLogContext();
+            context.generation = gen;
+            context.requestId = req;
+            sl_sync_meta_t resumeSync;
+            (void)consumeSyncContext(gen, req, context, &resumeSync);
             if (commandGenerationMatches(f) && opened) {
-                sl::DebugLogContext context = sl::currentDebugLogContext();
-                context.requestId = req;
                 sl::setDebugLogContext(context);
                 daemonLogReq(req, "resume status=sent");
                 player.play(req);
             }
         } else if (cmd == SL_CMD_SEEK) {
             std::uint64_t req = parseUnsigned(f[2]);
+            std::uint64_t gen = parseUnsigned(f[1]);
+            sl::DebugLogContext context = sl::currentDebugLogContext();
+            context.generation = gen;
+            context.requestId = req;
+            sl_sync_meta_t seekSync;
+            (void)consumeSyncContext(gen, req, context, &seekSync);
             if (commandGenerationMatches(f) && opened && f.size() >= 4) {
-                sl::DebugLogContext context = sl::currentDebugLogContext();
-                context.requestId = req;
                 sl::setDebugLogContext(context);
                 daemonLogReq(req, "seek target=%.3f status=sent", atof(f[3].c_str()));
                 player.seek(atof(f[3].c_str()), req);

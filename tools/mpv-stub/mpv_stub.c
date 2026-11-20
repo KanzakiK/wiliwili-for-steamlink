@@ -40,6 +40,12 @@ static void update_prop_and_notify(mpv_handle *ctx, const char *name,
                                    mpv_format fmt, void *value);
 static void d27_log(mpv_handle *ctx, const char *source, uint64_t gen,
                     uint64_t req, const char *fmt, ...);
+static void sync_end_epoch_locked(mpv_handle *ctx, const char *status,
+                                  const char *reason);
+static int send_meta_and_command(mpv_handle *ctx, uint64_t gen, uint64_t req,
+                                 const char *reason, int64_t targetMs,
+                                 const char *desired, const char *commandFrame);
+static double open_cmd_start(const char *cmd);
 
 /* ---- GL 函数加载（保留原桩逻辑，borealis 透明层补丁依赖）----
  * borealis 自带的 glad 是桌面 GL 加载器，在 GLES2 上下文中不会加载 GL 3.0 的
@@ -95,6 +101,17 @@ static int g_propDebug = 0;
 #define DAEMON_REAP_RECOVERY_MS 500
 #define DAEMON_REAP_TERMINATE_MS 5000
 
+typedef struct {
+    uint64_t epoch;
+    uint64_t generation;
+    uint64_t requestId;
+    int64_t targetMs;
+    char reason[SL_SYNC_REASON_MAX];
+    char desired[SL_SYNC_DESIRED_MAX];
+    int targetResolved;
+    int active;
+} sl_active_epoch_t;
+
 struct mpv_handle {
     int sock;                 /* 到 daemon 的连接；由 daemonMutex 保护 */
     pid_t daemonPid;          /* 由 daemonMutex 保护 */
@@ -126,6 +143,10 @@ struct mpv_handle {
     sl_session_meta_t sessionMeta;
     int hasSessionMeta;
     pthread_mutex_t metaMutex;
+
+    /* D28：compat 是 epoch 唯一所有者，只保留一个 active epoch。 */
+    sl_active_epoch_t activeEpoch;
+    uint64_t epochSeq;
 
     /* 断连恢复所需的播放快照 */
     int hasLastOpen;
@@ -259,53 +280,16 @@ static int send_cmd(mpv_handle *ctx, const char *cmd) {
     return MPV_ERROR_SUCCESS;
 }
 
-/* 同一把 tx 锁内写 meta+open 两帧，防止其他命令插到两者之间。
- * 无 session 时退化为只发 open，正式启动路径行为不变。 */
+/* open 专用入口：D28 的 meta 由通用 send_meta_and_command() 连续发出。
+ * 无 session 时仍发送 sync meta；正式启动路径行为不变。 */
 static int send_session_meta_and_open(mpv_handle *ctx, uint64_t gen, uint64_t req,
-                                      const char *openCmd) {
+                                      const char *openCmd, const char *reason,
+                                      int64_t targetMs) {
     if (!ctx || !openCmd) return MPV_ERROR_INVALID_PARAMETER;
-    char metaFrame[2048];
-    size_t metaLen = 0;
-    sl_session_meta_t meta;
-    int hasMeta = 0;
-
-    pthread_mutex_lock(&ctx->daemonMutex);
-    if (ctx->sock < 0) {
-        pthread_mutex_unlock(&ctx->daemonMutex);
-        return MPV_ERROR_GENERIC;
-    }
-    int fd = ctx->sock;
-    pthread_mutex_lock(&ctx->metaMutex);
-    hasMeta = ctx->hasSessionMeta;
-    if (hasMeta) meta = ctx->sessionMeta;
-    pthread_mutex_unlock(&ctx->metaMutex);
-
-    if (hasMeta) {
-        char args[1024];
-        size_t n = sl_session_meta_format_args(&meta, args, sizeof(args));
-        if (n == 0)
-            hasMeta = 0;
-        else
-            metaLen = (size_t)snprintf(metaFrame, sizeof(metaFrame),
-                                       "%s\t%llu\t%llu\t%s", SL_CMD_META,
-                                       (unsigned long long)gen,
-                                       (unsigned long long)req, args);
-    }
-
-    pthread_mutex_lock(&ctx->txMutex);
-    int rc = 0;
-    if (hasMeta && metaLen > 0 && metaLen < sizeof(metaFrame))
-        rc = send_payload(fd, metaFrame, metaLen);
-    if (rc == 0)
-        rc = send_payload(fd, openCmd, strlen(openCmd));
-    pthread_mutex_unlock(&ctx->txMutex);
-    pthread_mutex_unlock(&ctx->daemonMutex);
-    if (hasMeta)
-        d27_log(ctx, "CMD", gen, req,
-                "meta gen=%llu req=%llu run=%s session=%s status=sent",
-                (unsigned long long)gen, (unsigned long long)req,
-                meta.run, meta.session);
-    return rc == 0 ? MPV_ERROR_SUCCESS : MPV_ERROR_GENERIC;
+    return send_meta_and_command(ctx, gen, req, reason ? reason : "open",
+                                 targetMs, SL_SYNC_DESIRED_PLAY, openCmd) == 0
+               ? MPV_ERROR_SUCCESS
+               : MPV_ERROR_GENERIC;
 }
 
 /* P0 统一命令信封：name<TAB>fileGen<TAB>requestId<TAB>可选参数。 */
@@ -559,6 +543,181 @@ static void d27_log(mpv_handle *ctx, const char *source, uint64_t gen,
     vfprintf(stderr, fmt, args);
     va_end(args);
     fputc('\n', stderr);
+}
+
+/* D28：compat 独占 epoch 生命周期。以下函数都要求持有 daemonMutex；
+ * d27_log 只用 metaMutex，因此不会在这里死锁。 */
+static void sync_end_epoch_locked(mpv_handle *ctx, const char *status,
+                                  const char *reason) {
+    if (!ctx || !ctx->activeEpoch.active)
+        return;
+    sl_active_epoch_t epoch = ctx->activeEpoch;
+    ctx->activeEpoch.active = 0;
+    d27_log(ctx, "SYNC", epoch.generation, epoch.requestId,
+            "SYNC_END epoch=%llu status=%s reason=%s target_ms=%lld "
+            "desired=%s epoch_reason=%s",
+            (unsigned long long)epoch.epoch, status ? status : "-",
+            reason ? reason : "-", (long long)epoch.targetMs,
+            epoch.desired[0] ? epoch.desired : "-",
+            epoch.reason[0] ? epoch.reason : "-");
+}
+
+static void sync_begin_epoch_locked(mpv_handle *ctx, uint64_t gen, uint64_t req,
+                                    const char *reason, int64_t targetMs,
+                                    const char *desired) {
+    if (!ctx)
+        return;
+    sync_end_epoch_locked(ctx, "superseded", "new_epoch");
+    memset(&ctx->activeEpoch, 0, sizeof(ctx->activeEpoch));
+    ctx->activeEpoch.epoch = ++ctx->epochSeq;
+    ctx->activeEpoch.generation = gen;
+    ctx->activeEpoch.requestId = req;
+    ctx->activeEpoch.targetMs = targetMs;
+    ctx->activeEpoch.targetResolved = targetMs != SL_SYNC_TARGET_PENDING;
+    snprintf(ctx->activeEpoch.reason, sizeof(ctx->activeEpoch.reason), "%s",
+             reason && *reason ? reason : "open");
+    snprintf(ctx->activeEpoch.desired, sizeof(ctx->activeEpoch.desired), "%s",
+             desired && *desired ? desired : SL_SYNC_DESIRED_PLAY);
+    ctx->activeEpoch.active = 1;
+
+    char target[32];
+    if (targetMs == SL_SYNC_TARGET_PENDING)
+        snprintf(target, sizeof(target), "pending");
+    else
+        snprintf(target, sizeof(target), "%lld", (long long)targetMs);
+    d27_log(ctx, "SYNC", gen, req,
+            "SYNC_BEGIN epoch=%llu target_ms=%s reason=%s desired=%s",
+            (unsigned long long)ctx->activeEpoch.epoch, target,
+            ctx->activeEpoch.reason, ctx->activeEpoch.desired);
+}
+
+/* 构造 meta 帧；把 D27 session kv 和 D28 sync kv 放进同一帧。
+ * 无 session 时只写 sync kv，绝不伪造 run/session。 */
+static int build_meta_frame_locked(mpv_handle *ctx, uint64_t gen, uint64_t req,
+                                   const char *reason, int64_t targetMs,
+                                   const char *desired, char *frame, size_t cap) {
+    if (!ctx || !frame || cap == 0)
+        return -1;
+    sl_session_meta_t session;
+    int hasSession = 0;
+    pthread_mutex_lock(&ctx->metaMutex);
+    hasSession = ctx->hasSessionMeta;
+    if (hasSession) session = ctx->sessionMeta;
+    pthread_mutex_unlock(&ctx->metaMutex);
+
+    char sessionArgs[1024] = {0};
+    char syncArgs[256] = {0};
+    char args[1400] = {0};
+    size_t sessionLen = hasSession
+                            ? sl_session_meta_format_args(&session, sessionArgs,
+                                                          sizeof(sessionArgs))
+                            : 0;
+    sl_sync_meta_t sync;
+    sl_sync_meta_clear(&sync);
+    sync.epoch = ctx->activeEpoch.epoch;
+    sync.target_ms = targetMs;
+    snprintf(sync.reason, sizeof(sync.reason), "%s",
+             reason && *reason ? reason : "open");
+    snprintf(sync.desired, sizeof(sync.desired), "%s",
+             desired && *desired ? desired : SL_SYNC_DESIRED_PLAY);
+    size_t syncLen = sl_sync_meta_format_args(&sync, syncArgs, sizeof(syncArgs));
+    if (syncLen == 0)
+        return -1;
+
+    int n = 0;
+    if (sessionLen > 0)
+        n = snprintf(args, sizeof(args), "%s\t%s", sessionArgs, syncArgs);
+    else
+        n = snprintf(args, sizeof(args), "%s", syncArgs);
+    if (n <= 0 || (size_t)n >= sizeof(args))
+        return -1;
+    n = snprintf(frame, cap, "%s\t%llu\t%llu\t%s", SL_CMD_META,
+                 (unsigned long long)gen, (unsigned long long)req, args);
+    return n > 0 && (size_t)n < cap ? 0 : -1;
+}
+
+static int send_meta_and_command_locked(mpv_handle *ctx, uint64_t gen,
+                                        uint64_t req, const char *reason,
+                                        int64_t targetMs, const char *desired,
+                                        const char *commandFrame) {
+    if (!ctx || !commandFrame)
+        return -1;
+    if (ctx->sock < 0)
+        return -1;
+    int fd = ctx->sock;
+    sync_begin_epoch_locked(ctx, gen, req, reason, targetMs, desired);
+
+    char metaFrame[2048];
+    if (build_meta_frame_locked(ctx, gen, req, reason, targetMs, desired,
+                                metaFrame, sizeof(metaFrame)) < 0) {
+        sync_end_epoch_locked(ctx, "error", "meta_format");
+        return -1;
+    }
+
+    pthread_mutex_lock(&ctx->txMutex);
+    int rc = send_payload(fd, metaFrame, strlen(metaFrame));
+    if (rc == 0)
+        rc = send_payload(fd, commandFrame, strlen(commandFrame));
+    pthread_mutex_unlock(&ctx->txMutex);
+    if (rc != 0) {
+        sync_end_epoch_locked(ctx, "error", "send_failed");
+        return -1;
+    }
+
+    sl_session_meta_t meta;
+    pthread_mutex_lock(&ctx->metaMutex);
+    meta = ctx->sessionMeta;
+    pthread_mutex_unlock(&ctx->metaMutex);
+    d27_log(ctx, "CMD", gen, req,
+            "meta gen=%llu req=%llu run=%s session=%s sync_epoch=%llu "
+            "status=sent",
+            (unsigned long long)gen, (unsigned long long)req,
+            meta.run[0] ? meta.run : "-", meta.session[0] ? meta.session : "-",
+            (unsigned long long)ctx->activeEpoch.epoch);
+    return 0;
+}
+
+static int send_meta_and_command(mpv_handle *ctx, uint64_t gen, uint64_t req,
+                                 const char *reason, int64_t targetMs,
+                                 const char *desired, const char *commandFrame) {
+    if (!ctx || !commandFrame)
+        return -1;
+    pthread_mutex_lock(&ctx->daemonMutex);
+    int rc = send_meta_and_command_locked(ctx, gen, req, reason, targetMs,
+                                          desired, commandFrame);
+    pthread_mutex_unlock(&ctx->daemonMutex);
+    return rc;
+}
+
+/* 不改变时间线的命令继续走 send_context_cmd；这里只服务带 sync meta 的控制命令。 */
+static int send_sync_command(mpv_handle *ctx, const char *name,
+                             const char *reason, int64_t targetMs,
+                             const char *desired, const char *fmt, ...) {
+    if (!ctx || !name)
+        return MPV_ERROR_INVALID_PARAMETER;
+    uint64_t gen = 0, req = 0;
+    pthread_mutex_lock(&ctx->daemonMutex);
+    gen = ctx->fileGeneration;
+    req = ++ctx->requestSeq;
+    ctx->lastCommandReq = req;
+    pthread_mutex_unlock(&ctx->daemonMutex);
+
+    char body[1024] = {0};
+    if (fmt && *fmt) {
+        va_list ap;
+        va_start(ap, fmt);
+        vsnprintf(body, sizeof(body), fmt, ap);
+        va_end(ap);
+    }
+    char frame[1200];
+    int n = snprintf(frame, sizeof(frame), "%s\t%llu\t%llu\t%s", name,
+                     (unsigned long long)gen, (unsigned long long)req, body);
+    if (n <= 0 || (size_t)n >= sizeof(frame))
+        return MPV_ERROR_GENERIC;
+    return send_meta_and_command(ctx, gen, req, reason, targetMs, desired,
+                                 frame) == 0
+               ? MPV_ERROR_SUCCESS
+               : MPV_ERROR_GENERIC;
 }
 
 /* 播放健康提示出口：软/硬卡顿共用，具体文案由 UI 根据 reason 选择。 */
@@ -895,7 +1054,10 @@ static int recover_daemon_connection(mpv_handle *ctx) {
             pthread_mutex_unlock(&ctx->daemonMutex);
             d27_log(ctx, "COMPAT", replayGen, replayReq,
                     "replay open pos=%.3f pause=%d status=sent", pos, expPause);
-            if (send_session_meta_and_open(ctx, replayGen, replayReq, openCmd) != MPV_ERROR_SUCCESS)
+            if (send_session_meta_and_open(ctx, replayGen, replayReq, openCmd,
+                                           "watchdog_replay",
+                                           (int64_t)llround(pos * 1000.0)) !=
+                MPV_ERROR_SUCCESS)
                 d27_log(ctx, "COMPAT", replayGen, replayReq,
                         "replay open status=error");
         }
@@ -1017,6 +1179,9 @@ static void *watchdog_thread(void *arg) {
                         }
                         kill((pid_t)pid, SIGKILL);
                         ctx->watchdogKilledGeneration = gen;
+                        if (ctx->activeEpoch.active &&
+                            ctx->activeEpoch.generation == fileGen)
+                            sync_end_epoch_locked(ctx, "error", "watchdog");
                     }
                     pthread_mutex_unlock(&ctx->daemonMutex);
                 }
@@ -1123,7 +1288,9 @@ static int try_failover(mpv_handle *ctx) {
             "failover to backup gen=%llu req=%llu remaining=%d",
             (unsigned long long)failoverGen, (unsigned long long)failoverReq,
             ctx->backupCount);
-    send_session_meta_and_open(ctx, failoverGen, failoverReq, openCmd);
+    send_session_meta_and_open(ctx, failoverGen, failoverReq, openCmd,
+                               "failover",
+                               (int64_t)llround(failoverStart * 1000.0));
     return 1;
 }
 
@@ -1264,6 +1431,7 @@ static void *rx_thread(void *arg) {
                 e->data = end;
             }
             pthread_mutex_lock(&ctx->daemonMutex);
+            sync_end_epoch_locked(ctx, "ok", "eof");
             ctx->playbackActive = 0;
             ctx->hasLastOpen = 0; /* 自然结束后 daemon 再死不应重开旧视频 */
             ctx->hasInitialSeekTarget = 0;
@@ -1291,6 +1459,7 @@ static void *rx_thread(void *arg) {
             int *seekingOff = malloc(sizeof(int)); *seekingOff = 0;
             update_prop_and_notify(ctx, "seeking", MPV_FORMAT_FLAG, seekingOff);
             pthread_mutex_lock(&ctx->daemonMutex);
+            sync_end_epoch_locked(ctx, "error", "playback_error");
             ctx->playbackActive = 0;
             ctx->hasLastOpen = 0;
             ctx->hasInitialSeekTarget = 0;
@@ -1642,6 +1811,7 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
         }
         sl_session_meta_t session;
         int hasSession = sl_session_meta_parse_extra(extra, &session) == 1;
+        double openStart = 0.0;
         char buf[65000];
         build_open_cmd(url, method, extra, buf, sizeof(buf));
         pthread_mutex_lock(&ctx->daemonMutex);
@@ -1695,6 +1865,7 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
         ctx->suppressFileLoadedOnce = 0;
         ctx->suppressWatchdogReplay = 0;
         ctx->resumePosition = open_cmd_start(frame);
+        openStart = ctx->resumePosition;
         ctx->initialSeekTarget = ctx->resumePosition;
         ctx->hasInitialSeekTarget = ctx->initialSeekTarget > 0.0;
         ctx->lastResumeMs = monotonicMs();
@@ -1720,7 +1891,8 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
                 hasSession && session.bv[0] ? session.bv : "-",
                 hasSession && session.cid[0] ? session.cid : "-",
                 hasSession && session.qn[0] ? session.qn : "-");
-        return send_session_meta_and_open(ctx, openGen, openReq, frame);
+        return send_session_meta_and_open(ctx, openGen, openReq, frame, "open",
+                                          (int64_t)llround(openStart * 1000.0));
     }
     if (strcmp(cmd, "set") == 0) {
         const char *prop = args[1] ? args[1] : "";
@@ -1748,7 +1920,11 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
             ctx->expectedPause = yes;
             if (!yes) ctx->lastResumeMs = monotonicMs();
             pthread_mutex_unlock(&ctx->daemonMutex);
-            int rc = send_context_cmd(ctx, yes ? SL_CMD_PAUSE : SL_CMD_RESUME, "");
+            /* S01：pause 开始新 epoch；resume 的 epoch 复用留到 S04。 */
+            int rc = yes ? send_sync_command(ctx, SL_CMD_PAUSE, "pause_resume",
+                                             SL_SYNC_TARGET_PENDING,
+                                             SL_SYNC_DESIRED_PAUSE, "")
+                         : send_context_cmd(ctx, SL_CMD_RESUME, "");
             uint64_t pauseGen = 0, pauseReq = 0;
             pthread_mutex_lock(&ctx->daemonMutex);
             pauseGen = ctx->fileGeneration;
@@ -1813,7 +1989,9 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
 
         int *v = malloc(sizeof(int)); *v = 1;
         update_prop_and_notify(ctx, "seeking", MPV_FORMAT_FLAG, v);
-        int rc = send_context_cmd(ctx, SL_CMD_SEEK, "%.3f", target);
+        int rc = send_sync_command(ctx, SL_CMD_SEEK, "seek",
+                                   (int64_t)llround(target * 1000.0),
+                                   SL_SYNC_DESIRED_PLAY, "%.3f", target);
         uint64_t seekGen = 0, seekReq = 0;
         pthread_mutex_lock(&ctx->daemonMutex);
         seekGen = ctx->fileGeneration;
@@ -1846,6 +2024,9 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
         uint64_t stopReq = ctx->lastCommandReq;
         lifecycle_log(ctx, stopGen, stopReq,
                       "stop enter playbackActive=%d", ctx->playbackActive);
+        pthread_mutex_lock(&ctx->daemonMutex);
+        sync_end_epoch_locked(ctx, "ok", "stop");
+        pthread_mutex_unlock(&ctx->daemonMutex);
         pthread_mutex_lock(&ctx->txMutex);
         ctx->backupCount = 0;
         pthread_mutex_unlock(&ctx->txMutex);
@@ -2012,3 +2193,23 @@ uint64_t mpv_render_context_update(mpv_render_context *ctx) { (void)ctx; return 
 int mpv_render_context_render(mpv_render_context *ctx, mpv_render_param *params) { (void)ctx; (void)params; return 0; }
 void mpv_render_context_report_swap(mpv_render_context *ctx) { (void)ctx; }
 void mpv_render_context_free(mpv_render_context *ctx) { (void)ctx; }
+
+#ifdef SL_D28_TEST_HOOKS
+/* 仅供 S01 协议测试：直接验证 active epoch 终态的幂等性。
+ * 这些符号不会进入正式构建。 */
+void sl_d28_test_end_active_epoch(mpv_handle *ctx, const char *status,
+                                  const char *reason) {
+    if (!ctx) return;
+    pthread_mutex_lock(&ctx->daemonMutex);
+    sync_end_epoch_locked(ctx, status, reason);
+    pthread_mutex_unlock(&ctx->daemonMutex);
+}
+
+uint64_t sl_d28_test_active_epoch(mpv_handle *ctx) {
+    if (!ctx) return 0;
+    pthread_mutex_lock(&ctx->daemonMutex);
+    uint64_t epoch = ctx->activeEpoch.active ? ctx->activeEpoch.epoch : 0;
+    pthread_mutex_unlock(&ctx->daemonMutex);
+    return epoch;
+}
+#endif

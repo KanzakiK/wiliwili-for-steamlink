@@ -19,6 +19,8 @@ extern "C" {
 
 #include <stdint.h>
 #include <stddef.h>
+#include <errno.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -51,7 +53,7 @@ extern "C" {
  * bv 对 video/season 必填，live/dynamic/page 可空。
  * 字段值不含 TAB、换行、逗号和 '='，不携带签名 URL 或任何查询参数。
  */
-#define SL_CMD_META        "meta"      /* meta<TAB>gen<TAB>req<TAB>run=<id><TAB>session=<id><TAB>content=<type><TAB>id=<primary>[<TAB>bv=<BV>] */
+#define SL_CMD_META        "meta"      /* meta<TAB>gen<TAB>req<TAB>[session kv...][TAB][sync kv...] */
 #define SL_META_RUN_KEY    "run"
 #define SL_META_SESSION_KEY "session"
 #define SL_META_CONTENT_KEY "content"
@@ -182,6 +184,167 @@ static inline size_t sl_session_meta_format_args(const sl_session_meta_t *meta,
     if (n <= 0 || (size_t)n >= cap)
         return 0;
     return (size_t)n;
+}
+
+/* ---- D28 同步元数据 ----
+ * 与 D27 session meta 共用 SL_CMD_META 帧，但生命周期不同：
+ * session meta 按 generation 保存；sync meta 按 (gen, req) 暂存并一次性消费。
+ * 正式播放可能没有完整 session meta，sync meta 必须能独立存在。
+ */
+#define SL_SYNC_TARGET_PENDING (-1)
+#define SL_SYNC_KEY_EPOCH      "epoch"
+#define SL_SYNC_KEY_TARGET_MS  "target_ms"
+#define SL_SYNC_KEY_REASON     "reason"
+#define SL_SYNC_KEY_DESIRED    "desired"
+#define SL_SYNC_REASON_MAX     32
+#define SL_SYNC_DESIRED_MAX    8
+#define SL_SYNC_DESIRED_PLAY   "play"
+#define SL_SYNC_DESIRED_PAUSE  "pause"
+
+typedef struct {
+    uint64_t epoch;
+    int64_t target_ms;
+    char reason[SL_SYNC_REASON_MAX];
+    char desired[SL_SYNC_DESIRED_MAX];
+} sl_sync_meta_t;
+
+typedef struct {
+    int valid;
+    uint64_t generation;
+    uint64_t requestId;
+    sl_sync_meta_t meta;
+} sl_sync_context_t;
+
+static inline void sl_sync_meta_clear(sl_sync_meta_t *meta) {
+    if (meta)
+        memset(meta, 0, sizeof(*meta));
+}
+
+static inline void sl_sync_context_clear(sl_sync_context_t *context) {
+    if (context)
+        memset(context, 0, sizeof(*context));
+}
+
+static inline int sl_sync_meta_assign(sl_sync_meta_t *meta,
+                                      const char *key, const char *value) {
+    if (!meta || !key || !value)
+        return -1;
+    if (strcmp(key, SL_SYNC_KEY_EPOCH) == 0) {
+        char *end = NULL;
+        errno = 0;
+        unsigned long long v = strtoull(value, &end, 10);
+        if (errno || !end || *end || v == 0)
+            return -1;
+        meta->epoch = (uint64_t)v;
+        return 0;
+    }
+    if (strcmp(key, SL_SYNC_KEY_TARGET_MS) == 0) {
+        char *end = NULL;
+        errno = 0;
+        long long v = strtoll(value, &end, 10);
+        if (errno || !end || *end || v < SL_SYNC_TARGET_PENDING)
+            return -1;
+        meta->target_ms = (int64_t)v;
+        return 0;
+    }
+    if (strcmp(key, SL_SYNC_KEY_REASON) == 0) {
+        if (!*value || strpbrk(value, "= \t,"))
+            return -1;
+        return snprintf(meta->reason, sizeof(meta->reason), "%s", value) >=
+                       (int)sizeof(meta->reason)
+                   ? -1
+                   : 0;
+    }
+    if (strcmp(key, SL_SYNC_KEY_DESIRED) == 0) {
+        if (strcmp(value, SL_SYNC_DESIRED_PLAY) != 0 &&
+            strcmp(value, SL_SYNC_DESIRED_PAUSE) != 0)
+            return -1;
+        return snprintf(meta->desired, sizeof(meta->desired), "%s", value) >=
+                       (int)sizeof(meta->desired)
+                   ? -1
+                   : 0;
+    }
+    return 0; /* 未知键属于 D27 或其他扩展，忽略 */
+}
+
+/* 返回 1=四个字段齐全，0=没有 sync 字段，-1=字段非法或不完整。 */
+static inline int sl_sync_meta_parse_kv_list(const char *list, char sep,
+                                              sl_sync_meta_t *meta) {
+    if (!list || !meta)
+        return 0;
+    sl_sync_meta_clear(meta);
+    int hasEpoch = 0, hasTarget = 0, hasReason = 0, hasDesired = 0;
+    const char *p = list;
+    while (*p) {
+        const char *delim = strchr(p, sep);
+        size_t len = delim ? (size_t)(delim - p) : strlen(p);
+        if (len > 0 && len < 512) {
+            char pair[512];
+            memcpy(pair, p, len);
+            pair[len] = '\0';
+            char *eq = strchr(pair, '=');
+            if (eq) {
+                *eq = '\0';
+                if (sl_sync_meta_assign(meta, pair, eq + 1) < 0)
+                    return -1;
+                if (strcmp(pair, SL_SYNC_KEY_EPOCH) == 0) hasEpoch = 1;
+                else if (strcmp(pair, SL_SYNC_KEY_TARGET_MS) == 0) hasTarget = 1;
+                else if (strcmp(pair, SL_SYNC_KEY_REASON) == 0) hasReason = 1;
+                else if (strcmp(pair, SL_SYNC_KEY_DESIRED) == 0) hasDesired = 1;
+            }
+        }
+        if (!delim)
+            break;
+        p = delim + 1;
+    }
+    if (!hasEpoch && !hasTarget && !hasReason && !hasDesired)
+        return 0;
+    return hasEpoch && hasTarget && hasReason && hasDesired ? 1 : -1;
+}
+
+static inline size_t sl_sync_meta_format_args(const sl_sync_meta_t *meta,
+                                              char *dst, size_t cap) {
+    if (!meta || !dst || cap == 0)
+        return 0;
+    int n = snprintf(dst, cap,
+                     "%s=%llu\t%s=%lld\t%s=%s\t%s=%s",
+                     SL_SYNC_KEY_EPOCH, (unsigned long long)meta->epoch,
+                     SL_SYNC_KEY_TARGET_MS, (long long)meta->target_ms,
+                     SL_SYNC_KEY_REASON, meta->reason,
+                     SL_SYNC_KEY_DESIRED, meta->desired);
+    if (n <= 0 || (size_t)n >= cap)
+        return 0;
+    return (size_t)n;
+}
+
+static inline void sl_sync_context_set(sl_sync_context_t *context,
+                                       uint64_t generation, uint64_t requestId,
+                                       const sl_sync_meta_t *meta) {
+    if (!context || !meta)
+        return;
+    context->valid = 1;
+    context->generation = generation;
+    context->requestId = requestId;
+    context->meta = *meta;
+}
+
+/* 返回 1 表示身份匹配并已消费；0 表示没有上下文或身份不匹配。
+ * 不匹配时清空上下文并通过 mismatch 通知调用方记录协议错误。 */
+static inline int sl_sync_context_consume(sl_sync_context_t *context,
+                                          uint64_t generation,
+                                          uint64_t requestId,
+                                          sl_sync_meta_t *out, int *mismatch) {
+    if (mismatch) *mismatch = 0;
+    if (!context || !context->valid)
+        return 0;
+    if (context->generation != generation || context->requestId != requestId) {
+        sl_sync_context_clear(context);
+        if (mismatch) *mismatch = 1;
+        return 0;
+    }
+    if (out) *out = context->meta;
+    sl_sync_context_clear(context);
+    return 1;
 }
 
 /* ---- 命令（兼容层 -> daemon）---- */

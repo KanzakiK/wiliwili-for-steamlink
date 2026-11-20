@@ -78,6 +78,74 @@ int main(void) {
     CHECK(strcmp(meta.content, "live") == 0);
     CHECK(meta.bv[0] == '\0');
 
+    /* D28 sync meta：可以独立存在，不要求 run/session/content/id。 */
+    sl_sync_meta_t sync;
+    const char *syncArgs =
+        "epoch=7\ttarget_ms=12345\treason=seek\tdesired=play";
+    CHECK(sl_sync_meta_parse_kv_list(syncArgs, SL_IPC_FIELD_SEP, &sync) == 1);
+    CHECK(sync.epoch == 7);
+    CHECK(sync.target_ms == 12345);
+    CHECK(strcmp(sync.reason, "seek") == 0);
+    CHECK(strcmp(sync.desired, SL_SYNC_DESIRED_PLAY) == 0);
+    CHECK(sl_session_meta_parse_kv_list(syncArgs, SL_IPC_FIELD_SEP, &meta) == 0);
+
+    memset(args, 0, sizeof(args));
+    CHECK(sl_sync_meta_format_args(&sync, args, sizeof(args)) > 0);
+    CHECK(strstr(args, "epoch=7\t") == args);
+    CHECK(strstr(args, "target_ms=12345") != NULL);
+    CHECK(strstr(args, "reason=seek") != NULL);
+    CHECK(strstr(args, "desired=play") != NULL);
+
+    const char *pendingArgs =
+        "epoch=8\ttarget_ms=-1\treason=pause_resume\tdesired=pause";
+    CHECK(sl_sync_meta_parse_kv_list(pendingArgs, SL_IPC_FIELD_SEP, &sync) == 1);
+    CHECK(sync.epoch == 8);
+    CHECK(sync.target_ms == SL_SYNC_TARGET_PENDING);
+    CHECK(strcmp(sync.desired, SL_SYNC_DESIRED_PAUSE) == 0);
+
+    /* 同一 meta 帧里两类 kv 并存，各自解析互不覆盖。 */
+    const char *combined =
+        "run=r1\tsession=r1-1\tcontent=video\tid=BV1TEST\t"
+        "epoch=9\ttarget_ms=6789\treason=quality_change\tdesired=play";
+    CHECK(sl_session_meta_parse_kv_list(combined, SL_IPC_FIELD_SEP, &meta) == 1);
+    CHECK(strcmp(meta.run, "r1") == 0);
+    CHECK(strcmp(meta.bv, "") == 0);
+    CHECK(sl_sync_meta_parse_kv_list(combined, SL_IPC_FIELD_SEP, &sync) == 1);
+    CHECK(sync.epoch == 9);
+    CHECK(sync.target_ms == 6789);
+    CHECK(strcmp(sync.reason, "quality_change") == 0);
+
+    CHECK(sl_sync_meta_parse_kv_list(
+              "epoch=1\ttarget_ms=2\treason=seek", SL_IPC_FIELD_SEP, &sync) == -1);
+    CHECK(sl_sync_meta_parse_kv_list(
+              "epoch=1\ttarget_ms=bad\treason=seek\tdesired=play",
+              SL_IPC_FIELD_SEP, &sync) == -1);
+    CHECK(sl_sync_meta_parse_kv_list(
+              "epoch=1\ttarget_ms=2\treason=seek\tdesired=running",
+              SL_IPC_FIELD_SEP, &sync) == -1);
+
+    /* pending context 只允许正确 (gen, req) 消费一次；错配立即丢弃。 */
+    sl_sync_context_t context;
+    sl_sync_meta_t out;
+    int mismatch = 0;
+    sl_sync_context_clear(&context);
+    CHECK(sl_sync_context_consume(&context, 1, 2, &out, &mismatch) == 0);
+    CHECK(mismatch == 0);
+
+    CHECK(sl_sync_meta_parse_kv_list(syncArgs, SL_IPC_FIELD_SEP, &sync) == 1);
+    sl_sync_context_set(&context, 1, 2, &sync);
+    CHECK(sl_sync_context_consume(&context, 1, 3, &out, &mismatch) == 0);
+    CHECK(mismatch == 1);
+    CHECK(context.valid == 0);
+
+    sl_sync_context_set(&context, 1, 2, &sync);
+    mismatch = 0;
+    CHECK(sl_sync_context_consume(&context, 1, 2, &out, &mismatch) == 1);
+    CHECK(mismatch == 0);
+    CHECK(out.epoch == 7);
+    CHECK(context.valid == 0);
+    CHECK(sl_sync_context_consume(&context, 1, 2, &out, &mismatch) == 0);
+
     printf("session meta contract ok\n");
     return 0;
 }
