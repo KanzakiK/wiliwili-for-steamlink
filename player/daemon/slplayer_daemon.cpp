@@ -77,6 +77,17 @@ static std::string metaIdentity(const sl_session_meta_t& meta) {
            " cid=" + dash(meta.cid) + " qn=" + dash(meta.qn);
 }
 
+static sl::SyncContext syncContextFromMeta(const sl_sync_meta_t& meta,
+                                           std::uint64_t requestId) {
+    sl::SyncContext context;
+    context.epoch = meta.epoch;
+    context.targetMs = meta.target_ms;
+    context.reason = meta.reason;
+    context.desiredPlay = std::strcmp(meta.desired, SL_SYNC_DESIRED_PAUSE) != 0;
+    context.requestId = requestId;
+    return context;
+}
+
 static void daemonLogV(const char* source, std::uint64_t req,
                        const char* fmt, va_list args) {
     char message[2048];
@@ -542,7 +553,8 @@ int main(int argc, char** argv) {
                 context.requestId = requestId;
             }
             sl_sync_meta_t openSync;
-            (void)consumeSyncContext(fileGen, requestId, context, &openSync);
+            bool hasOpenSync =
+                consumeSyncContext(fileGen, requestId, context, &openSync);
             sl::setDebugLogContext(context);
             std::lock_guard<std::mutex> lock(playerMutex);
             daemonLogReq(requestId, "open enter opened=%d", opened ? 1 : 0);
@@ -550,6 +562,8 @@ int main(int argc, char** argv) {
             daemonLogReq(requestId, "open old player stopped");
             sl::SourceSpec spec;
             spec.debug = context;
+            if (hasOpenSync)
+                spec.sync = syncContextFromMeta(openSync, requestId);
             spec.videoUrl = f[3];
             spec.referrer = f[4];
             spec.startSeconds = atof(f[5].c_str());
@@ -574,11 +588,13 @@ int main(int argc, char** argv) {
             context.generation = gen;
             context.requestId = req;
             sl_sync_meta_t pauseSync;
-            (void)consumeSyncContext(gen, req, context, &pauseSync);
+            bool hasPauseSync = consumeSyncContext(gen, req, context, &pauseSync);
             if (commandGenerationMatches(f) && opened) {
                 sl::setDebugLogContext(context);
+                sl::SyncContext sync;
+                if (hasPauseSync) sync = syncContextFromMeta(pauseSync, req);
                 daemonLogReq(req, "pause status=sent");
-                player.pause(req);
+                player.pause(req, sync);
             }
         } else if (cmd == SL_CMD_RESUME) {
             std::uint64_t req = parseUnsigned(f[2]);
@@ -587,11 +603,13 @@ int main(int argc, char** argv) {
             context.generation = gen;
             context.requestId = req;
             sl_sync_meta_t resumeSync;
-            (void)consumeSyncContext(gen, req, context, &resumeSync);
+            bool hasResumeSync = consumeSyncContext(gen, req, context, &resumeSync);
             if (commandGenerationMatches(f) && opened) {
                 sl::setDebugLogContext(context);
+                sl::SyncContext sync;
+                if (hasResumeSync) sync = syncContextFromMeta(resumeSync, req);
                 daemonLogReq(req, "resume status=sent");
-                player.play(req);
+                player.play(req, sync);
             }
         } else if (cmd == SL_CMD_SEEK) {
             std::uint64_t req = parseUnsigned(f[2]);
@@ -600,11 +618,13 @@ int main(int argc, char** argv) {
             context.generation = gen;
             context.requestId = req;
             sl_sync_meta_t seekSync;
-            (void)consumeSyncContext(gen, req, context, &seekSync);
+            bool hasSeekSync = consumeSyncContext(gen, req, context, &seekSync);
             if (commandGenerationMatches(f) && opened && f.size() >= 4) {
                 sl::setDebugLogContext(context);
+                sl::SyncContext sync;
+                if (hasSeekSync) sync = syncContextFromMeta(seekSync, req);
                 daemonLogReq(req, "seek target=%.3f status=sent", atof(f[3].c_str()));
-                player.seek(atof(f[3].c_str()), req);
+                player.seek(atof(f[3].c_str()), req, sync);
             }
         } else if (cmd == SL_CMD_STOP) {
             if (!commandGenerationMatches(f)) continue;

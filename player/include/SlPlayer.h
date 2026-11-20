@@ -11,6 +11,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <string>
@@ -19,6 +20,48 @@
 #include "DebugLog.h"
 
 namespace sl {
+
+struct SyncContext {
+    std::uint64_t epoch = 0;
+    std::int64_t targetMs = -1;
+    std::string reason;
+    bool desiredPlay = true;
+    std::uint64_t requestId = 0;
+};
+
+enum class SyncPhase { Idle = 0, Preparing = 1, Running = 2, Paused = 3 };
+enum SyncReadyBit { kSyncReadyVideo = 1u, kSyncReadyAudio = 2u };
+
+/* D28 S03：SlPlayer 本地状态。epoch 只用于丢弃过期准备结果，不负责创建/结束。 */
+struct SyncStateTracker {
+    std::atomic<int> phase{static_cast<int>(SyncPhase::Idle)};
+    std::atomic<int> desiredPlay{1};
+    std::atomic<unsigned> readyMask{0};
+    std::atomic<std::uint64_t> epoch{0};
+    std::atomic<std::uint64_t> requestId{0};
+
+    void begin(std::uint64_t newEpoch, std::uint64_t req, bool play) {
+        epoch.store(newEpoch);
+        requestId.store(req);
+        desiredPlay.store(play ? 1 : 0);
+        readyMask.store(0);
+        phase.store(static_cast<int>(SyncPhase::Preparing));
+    }
+
+    bool matches(std::uint64_t eventEpoch) const {
+        std::uint64_t current = epoch.load();
+        return eventEpoch == 0 || eventEpoch == current;
+    }
+
+    void setReady(unsigned bit) { readyMask.fetch_or(bit); }
+    void clearReady(unsigned bit) { readyMask.fetch_and(~bit); }
+    void clearAllReady() { readyMask.store(0); }
+    bool has(unsigned bit) const { return (readyMask.load() & bit) != 0; }
+    bool allReady() const {
+        unsigned bits = kSyncReadyVideo | kSyncReadyAudio;
+        return (readyMask.load() & bits) == bits;
+    }
+};
 
 struct SourceSpec {
     std::string videoUrl;
@@ -33,6 +76,8 @@ struct SourceSpec {
     double endSeconds = 0.0;
     /* D27 调试上下文，仅由 debug 入口填充；正式路径为空。 */
     DebugLogContext debug;
+    /* D28 同步上下文；旧调用者不填时 epoch=0，走兼容路径。 */
+    SyncContext sync;
 };
 
 struct VideoInfo {
@@ -141,14 +186,15 @@ public:
     /* 异步：立即返回，Opened/Error 通过事件通知 */
     bool open(const SourceSpec& spec);
     /* requestId 由上层分配，对应状态完成事件原样回传；0 表示无请求方。 */
-    void play(std::uint64_t requestId = 0);
-    void pause(std::uint64_t requestId = 0);
+    void play(std::uint64_t requestId = 0, const SyncContext& sync = {});
+    void pause(std::uint64_t requestId = 0, const SyncContext& sync = {});
     bool isPaused() const;
     bool isRunning() const;
     /* 同步：停止播放线程并释放 SLVideo/SLAudio */
     void stop();
     /* 异步跳转（秒）；同一文件的旧请求完成时不再上报。 */
-    void seek(double seconds, std::uint64_t requestId = 0);
+    void seek(double seconds, std::uint64_t requestId = 0,
+              const SyncContext& sync = {});
 
     double position() const;
     double duration() const;
