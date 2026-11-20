@@ -31,6 +31,16 @@ extern "C" {
 namespace sl {
 namespace {
 
+static bool debugFaultEnabled(const char* name) {
+    const char* run = std::getenv("SL_DEBUG_RUN_ID");
+    if (!run || !*run)
+        return false;
+    const char* value = std::getenv(name);
+    return value && *value && std::strcmp(value, "0") != 0;
+}
+
+static std::atomic<bool> gPrimaryErrorInjected{false};
+
 constexpr unsigned kVideoQueueMaxMs = 4000;
 constexpr double kSyncPrerollMs = 50.0;
 /* 队列反压期间不喂帧，watchdog 必须挂起；但只给有限时间，
@@ -222,6 +232,7 @@ struct Player::Impl {
         vpuLog("open: stop previous player");
         stop();
         vpuLog("open: previous player stopped");
+        lastFrameTimeMs_.store(0);
         if (spec.videoUrl.empty())
             return false;
 
@@ -1152,6 +1163,16 @@ void Player::Impl::run() {
         logSyncReadyIfReady(presentationMs);
     };
 
+    auto failPrimaryIfRequested = [&]() -> bool {
+        if (!debugFaultEnabled("SL_DEBUG_PRIMARY_ERROR"))
+            return false;
+        if (gPrimaryErrorInjected.exchange(true))
+            return false;
+        sl::d27Log("PLAYER", "debug fault primary video error after sync start");
+        fail("debug fault primary video error");
+        return true;
+    };
+
     auto doAudioPrepare = [&](double target, std::uint64_t requestId,
                               bool forPlay) -> std::uint64_t {
         syncState_.clearReady(kSyncReadyAudio);
@@ -1213,6 +1234,7 @@ void Player::Impl::run() {
         /* 呈现估计只能由本 epoch 首帧的真实 pts 推进；用目标预置会让
          * 队列增长时 presentationMs 从目标值倒退并触发同步误判。 */
         maxSubmittedMs = 0.0;
+        lastFrameTimeMs_.store(0);
         videoClock = requestedTarget;
         position_ = requestedTarget;
         nextDeadline = std::chrono::steady_clock::now();
@@ -1325,6 +1347,7 @@ void Player::Impl::run() {
             queueMax = 0;
             queueFlatFrames = 0;
             maxSubmittedMs = 0.0;
+            lastFrameTimeMs_.store(0);
             audioBaseMs = at * 1000.0;
             lastSeekTargetMs = at * 1000.0;
             seekDisplayTargetMs = at * 1000.0;
@@ -1392,6 +1415,7 @@ void Player::Impl::run() {
             queueMax = 0;
             queueFlatFrames = 0;
             maxSubmittedMs = 0.0;
+            lastFrameTimeMs_.store(0);
             audioBaseMs = at * 1000.0;
             lastSeekTargetMs = at * 1000.0;
             seekDisplayTargetMs = at * 1000.0;
@@ -1685,6 +1709,8 @@ void Player::Impl::run() {
                                                    "present=%.2f target=%.0f skip=%.2f",
                                                    presentationMs, audioBaseMs,
                                                    skipMs);
+                                if (failPrimaryIfRequested())
+                                    return;
                             }
                         }
                     }
@@ -1711,6 +1737,8 @@ void Player::Impl::run() {
                                            "target=%.2f present=%.2f skip=%.2f",
                                            audioStartPositionMs, presentationMs,
                                            skipMs);
+                        if (failPrimaryIfRequested())
+                            return;
                     }
 
                     /* 同步等待只允许失败，不允许绕过对齐强行出声。

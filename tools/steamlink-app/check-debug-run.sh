@@ -61,6 +61,7 @@ FAIL_AUDIO_CREATE=$(sed -n 's/^fail_audio_create=//p' "$RUN_DIR/manifest.txt" 2>
 NO_AUDIO=$(sed -n 's/^no_audio=//p' "$RUN_DIR/manifest.txt" 2>/dev/null | head -1)
 FORCE_FAILOVER=$(sed -n 's/^force_failover=//p' "$RUN_DIR/manifest.txt" 2>/dev/null | head -1)
 FORCE_WATCHDOG=$(sed -n 's/^force_watchdog=//p' "$RUN_DIR/manifest.txt" 2>/dev/null | head -1)
+PRIMARY_ERROR=$(sed -n 's/^primary_error=//p' "$RUN_DIR/manifest.txt" 2>/dev/null | head -1)
 EXPECT_FAILURE=0
 if [ "$FAIL_AUDIO_SEEK" = "1" ] || [ "$FAIL_AUDIO_CREATE" = "1" ]; then
     EXPECT_FAILURE=1
@@ -82,7 +83,7 @@ for key in created_at collected_at archive_size_bytes; do
         fail "manifest 缺少 $key"
     fi
 done
-for key in no_audio fail_audio_seek fail_audio_create force_failover force_watchdog; do
+for key in no_audio fail_audio_seek fail_audio_create force_failover force_watchdog primary_error; do
     if grep -q "^$key=" "$RUN_DIR/manifest.txt" 2>/dev/null; then
         pass "manifest 含 $key"
     else
@@ -504,6 +505,22 @@ if [ "$FORCE_FAILOVER" = "1" ]; then
         fail "failover 未使用故障时位置"
     fi
     check_pattern wiliwili.log "reason=failover" "failover 新 epoch"
+fi
+if [ "$PRIMARY_ERROR" = "1" ]; then
+    check_pattern wiliwili.log "debug fault primary video error" "主源错误故障注入"
+    check_pattern wiliwili.log "error message=debug fault primary video error" "daemon 上报真实 error 事件"
+    if grep -F "failover to backup gen=" "$RUN_DIR/wiliwili.log" |
+       grep -E "source=(heartbeat|resume_position|active_target)" >/dev/null 2>&1; then
+        pass "主源错误后使用故障时位置"
+    else
+        fail "主源错误后未使用故障时位置"
+    fi
+    check_pattern wiliwili.log "reason=failover" "主源错误新 epoch"
+    if grep -F "SYNC_END" "$RUN_DIR/wiliwili.log" | grep -F "status=error reason=playback_error" >/dev/null 2>&1; then
+        fail "备用源接管失败，主源错误未被 failover 消化"
+    else
+        pass "备用源接管成功"
+    fi
 fi
 if [ "$FORCE_WATCHDOG" = "1" ]; then
     check_pattern wiliwili.log "debug fault force-watchdog at playback stable" "watchdog 故障注入"

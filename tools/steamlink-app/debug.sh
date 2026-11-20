@@ -33,6 +33,7 @@ FAIL_AUDIO_SEEK=0
 FAIL_AUDIO_CREATE=0
 FORCE_FAILOVER=0
 FORCE_WATCHDOG=0
+PRIMARY_ERROR=0
 DEBUG_ARGS=()
 SCENE_ARGS=()
 WILI_FLAGS=()
@@ -64,6 +65,7 @@ while [ $# -gt 0 ]; do
         --fail-audio-create) FAIL_AUDIO_CREATE=1; shift ;;
         --force-failover) FORCE_FAILOVER=1; shift ;;
         --force-watchdog) FORCE_WATCHDOG=1; shift ;;
+        --primary-error) PRIMARY_ERROR=1; shift ;;
         --diag|--sync-debug|--http-debug|--stop-debug|--diag-all)
             WILI_FLAGS+=("$1"); shift ;;
         -h|--help) usage ;;
@@ -100,6 +102,7 @@ SCP="sshpass -p $PASS scp -o StrictHostKeyChecking=no"
     echo "fail_audio_create=$FAIL_AUDIO_CREATE"
     echo "force_failover=$FORCE_FAILOVER"
     echo "force_watchdog=$FORCE_WATCHDOG"
+    echo "primary_error=$PRIMARY_ERROR"
     echo "created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "host_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "device_time=$($SSH date 2>/dev/null || echo unavailable)"
@@ -167,6 +170,9 @@ if [ "$FORCE_FAILOVER" = "1" ]; then
 fi
 if [ "$FORCE_WATCHDOG" = "1" ]; then
     fault_export="$fault_export SL_DEBUG_FORCE_WATCHDOG=1"
+fi
+if [ "$PRIMARY_ERROR" = "1" ]; then
+    fault_export="$fault_export SL_DEBUG_PRIMARY_ERROR=1"
 fi
 
 cat > "$RUN_DIR/launch_cmdline.txt" <<EOF

@@ -1408,6 +1408,28 @@ static int try_failover(mpv_handle *ctx) {
         failoverStart = open_cmd_start(cmd);
         failoverSource = "open_start";
     }
+    /* 备用源复用同一个 daemon 进程，fileGeneration 改变但 daemonGeneration 不变。
+     * 必须清掉主源的帧龄/心跳/健康状态，否则 watchdog 会用旧代次的停滞证据
+     * 立刻误杀刚打开的备用源。 */
+    {
+        long long now = monotonicMs();
+        ctx->heartbeatReceivedMs = now;
+        ctx->lastResumeMs = now;
+        ctx->hbLastFrameTimeMs = 0;
+        ctx->hbPlaying = 0;
+        ctx->hbInTransition = 1;
+        ctx->hbVideoFrames = 0;
+        ctx->hbValid = 0;
+        ctx->hbPresentationMs = 0;
+        ctx->hbVideoQueueMs = 0;
+        ctx->hbNetworkErrorAgeMs = 0;
+        ctx->hbBackpressure = 0;
+        ctx->hbHealthValid = 0;
+        ctx->hbRequestId = failoverReq;
+        ctx->healthGeneration = UINT64_MAX;
+        ctx->healthHintShown = 0;
+        ctx->healthBaselineValid = 0;
+    }
     ctx->hasLastOpen = 1;
     ctx->playbackActive = 1;
     ctx->resumePosition = failoverStart;
@@ -2201,7 +2223,9 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
          * 真机现象：视频不开始播放、进度停在 0（且会顺手关掉播放页透明）。 */
         pthread_mutex_lock(&ctx->txMutex);
         int dropped = ctx->backupCount;
-        int kept = debugFaultEnabled("SL_DEBUG_FORCE_FAILOVER") && dropped > 0 ? 1 : 0;
+        int keepDebugBackup = debugFaultEnabled("SL_DEBUG_FORCE_FAILOVER") ||
+                              debugFaultEnabled("SL_DEBUG_PRIMARY_ERROR");
+        int kept = keepDebugBackup && dropped > 0 ? 1 : 0;
         ctx->backupCount = kept;
         dropped -= kept;
         pthread_mutex_unlock(&ctx->txMutex);
