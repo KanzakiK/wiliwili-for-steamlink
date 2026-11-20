@@ -122,7 +122,9 @@ bool AudioPipeline::start(CSLAudioContext* context, AVFormatContext* format,
     pendingStartAt_ = 0.0;
     pendingStartSequence_ = 0;
 
-    sl::d27Log("AUDIO", "format source=%dHz sink=%dHz channels=2 frame_bytes=%d frame_ms=%d",
+    sl::d27Log("AUDIO",
+               "format source=%dHz sink=%dHz channels=2 frame_bytes=%d "
+               "frame_ms=%d",
                sourceRate, kSinkRateHz, frameBytes_, kFrameMs);
 
     if (const char* dumpPath = std::getenv("SL_AUDIO_DUMP_PCM")) {
@@ -130,6 +132,14 @@ bool AudioPipeline::start(CSLAudioContext* context, AVFormatContext* format,
             pcmDump_ = std::fopen(dumpPath, "wb");
             pcmDumpBytes_ = 0;
             sl::d27Log("AUDIO", "pcm dump enabled path=%s limit=%u",
+                       dumpPath, (unsigned)kPcmDumpLimitBytes);
+        }
+    }
+    if (const char* dumpPath = std::getenv("SL_AUDIO_SUBMIT_DUMP_PCM")) {
+        if (*dumpPath && !submitDump_) {
+            submitDump_ = std::fopen(dumpPath, "wb");
+            submitDumpBytes_ = 0;
+            sl::d27Log("AUDIO", "submit dump enabled path=%s limit=%u",
                        dumpPath, (unsigned)kPcmDumpLimitBytes);
         }
     }
@@ -151,6 +161,12 @@ void AudioPipeline::stop() {
         pcmDump_ = nullptr;
         sl::d27Log("AUDIO", "pcm dump closed bytes=%u",
                    (unsigned)pcmDumpBytes_);
+    }
+    if (submitDump_) {
+        std::fclose(submitDump_);
+        submitDump_ = nullptr;
+        sl::d27Log("AUDIO", "submit dump closed bytes=%u",
+                   (unsigned)submitDumpBytes_);
     }
 
     {
@@ -556,6 +572,13 @@ bool AudioPipeline::drainFrame() {
     }
 
     writeFrame(output, pending_.data(), frameBytes_);
+    if (submitDump_ && submitDumpBytes_ < kPcmDumpLimitBytes) {
+        std::size_t want = (std::size_t)frameBytes_;
+        if (want > kPcmDumpLimitBytes - submitDumpBytes_)
+            want = kPcmDumpLimitBytes - submitDumpBytes_;
+        std::fwrite(pending_.data(), 1, want, submitDump_);
+        submitDumpBytes_ += want;
+    }
     SLAudio_SubmitFrame(stream_);
     submittedBytes_ += (uint64_t)frameBytes_;
     return true;

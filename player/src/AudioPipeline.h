@@ -143,6 +143,8 @@ private:
     int swrInputChannels_ = 0;
     std::FILE* pcmDump_ = nullptr;
     std::size_t pcmDumpBytes_ = 0;
+    std::FILE* submitDump_ = nullptr;
+    std::size_t submitDumpBytes_ = 0;
 
     std::atomic<int> rate_{0};
     int frameBytes_ = 0;
