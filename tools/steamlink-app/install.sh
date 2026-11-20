@@ -30,6 +30,8 @@ fi
 APP_NAME=${APP_NAME:-wiliwili}
 APP_DIR=/home/apps/$APP_NAME
 APP_HOME=/usr/local/$APP_NAME
+VERSION=${VERSION:-$(git -C "$(dirname "$0")/../.." describe --tags --always --dirty 2>/dev/null || echo dev)}
+COMMIT=$(git -C "$(dirname "$0")/../.." rev-parse HEAD 2>/dev/null || echo unknown)
 WILI_BUILD=${WILI_BUILD:-$HOME/build-wiliwili}
 PLAYER_BUILD=${PLAYER_BUILD:-$HOME/build-slplayer}
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -46,6 +48,12 @@ echo "ok"
 
 echo "== 2/6 创建目录 =="
 $SSH "mkdir -p $APP_DIR/bin $APP_HOME"
+
+# 安装包和真机安装目录保持同一版本信息，避免旧 VERSION.txt 残留。
+VERSION_FILE=$(mktemp)
+trap 'rm -f "$VERSION_FILE"' EXIT
+printf 'version=%s\ncommit=%s\nbuilt=%s\n' "$VERSION" "$COMMIT" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$VERSION_FILE"
+$SCP "$VERSION_FILE" "$DEVICE:$APP_DIR/VERSION.txt"
 
 echo "== 3/6 部署小文件（toc/脚本/图标）=="
 $SCP "$HERE/toc.txt" "$HERE/wiliwili.sh" "$HERE/wiliwili.png" "$DEVICE:$APP_DIR/"
