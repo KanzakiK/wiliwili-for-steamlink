@@ -262,15 +262,16 @@ void VideoDetail::requestVideoInfo(const std::string& bvid) {
 }
 
 /// 获取视频地址
-void VideoDetail::requestVideoUrl(const std::string& bvid, uint64_t cid, bool requestHistoryInfo) {
+void VideoDetail::requestVideoUrl(const std::string& bvid, uint64_t cid, bool requestHistoryInfo, int qn) {
     // 重置MPV
     MPVCore::instance().reset();
+    int requestedQuality = qn > 0 ? qn : defaultQuality;
     ASYNC_RETAIN
-    brls::Logger::debug("请求视频播放地址: {}/{}/{}", bvid, cid, defaultQuality);
+    brls::Logger::debug("请求视频播放地址: {}/{}/{}", bvid, cid, requestedQuality);
     if (cid == 0) return;
 
     BILI::get_video_url(
-        bvid, cid, defaultQuality,
+        bvid, cid, requestedQuality,
         [ASYNC_TOKEN](const bilibili::VideoUrlResult& result) {
             brls::sync([ASYNC_TOKEN, result]() {
                 ASYNC_RELEASE
@@ -298,14 +299,15 @@ void VideoDetail::requestVideoUrl(const std::string& bvid, uint64_t cid, bool re
 }
 
 /// 获取番剧地址
-void VideoDetail::requestSeasonVideoUrl(const std::string& bvid, uint64_t cid, bool requestHistoryInfo) {
+void VideoDetail::requestSeasonVideoUrl(const std::string& bvid, uint64_t cid, bool requestHistoryInfo, int qn) {
     // 重置MPV
     MPVCore::instance().reset();
+    int requestedQuality = qn > 0 ? qn : defaultQuality;
 
     ASYNC_RETAIN
     brls::Logger::debug("请求番剧视频播放地址: {}", cid);
     BILI::get_season_url(
-        cid, defaultQuality,
+        cid, requestedQuality,
         [ASYNC_TOKEN](const bilibili::SeasonUrlResult& result) {
             brls::sync([ASYNC_TOKEN, result]() {
                 ASYNC_RELEASE

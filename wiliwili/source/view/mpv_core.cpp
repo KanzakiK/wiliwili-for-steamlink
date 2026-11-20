@@ -15,6 +15,7 @@
 #include "utils/number_helper.hpp"
 #include "utils/crash_helper.hpp"
 #include "view/mpv_core.hpp"
+#include "view/video_view.hpp"
 
 #ifdef MPV_BUNDLE_DLL
 mpvSetOptionStringFunc mpvSetOptionString;
@@ -1156,6 +1157,11 @@ void MPVCore::eventMainLoop() {
                             int reason = *(int *)data;
                             static const char* softHint = "播放不流畅，可尝试降低清晰度";
                             static const char* hardHint = "播放卡顿，已尝试自动恢复，可尝试降低清晰度";
+                            if (reason == 2) {
+                                bool handled = false;
+                                APP_E->fire(VideoView::AUTO_QUALITY_DOWNGRADE, &handled);
+                                if (handled) break; // 播放器页面已处理并显示专属文案
+                            }
                             const char* hint = reason == 2 ? hardHint : softHint;
                             wiliwili::d27::log("UI", std::string("health hint shown reason=") +
                                                            (reason == 2 ? "hard" : "soft"));

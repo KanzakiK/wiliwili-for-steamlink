@@ -144,6 +144,17 @@ private:
 
     // 重新选择当前清晰度的播放链接播放
     void updateVideoLink();
+
+    // D22 硬卡顿自动降级只作用于当前内容，不写回用户设置。
+    bool autoDowngradeForHardStall();
+    std::string currentContentKey() const;
+    void resetSessionQualityOverride();
+    std::string sessionQualityContentKey;
+    int sessionQualityOverride = 0;
+    bool hardAutoDowngradeApplied = false;
+    bool autoDowngradePending = false;
+    int autoDowngradeFromQn = 0;
+    std::string autoDowngradeOldSession;
 };
 
 class PlayerActivity : public BasePlayerActivity {

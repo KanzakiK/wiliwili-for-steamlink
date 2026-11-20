@@ -63,13 +63,13 @@ public:
      * 获取视频地址
      * @param requestHistoryInfo 是否获取历史播放进度
      */
-    void requestVideoUrl(const std::string& bvid, uint64_t cid, bool requestHistoryInfo = true);
+    void requestVideoUrl(const std::string& bvid, uint64_t cid, bool requestHistoryInfo = true, int qn = 0);
 
     /**
      * 获取番剧地址
      * @param requestHistoryInfo 是否获取历史播放进度
      */
-    void requestSeasonVideoUrl(const std::string& bvid, uint64_t cid, bool requestHistoryInfo = true);
+    void requestSeasonVideoUrl(const std::string& bvid, uint64_t cid, bool requestHistoryInfo = true, int qn = 0);
 
     /// 获取投屏地址
     void requestCastVideoUrl(uint64_t oid, uint64_t cid, int type);

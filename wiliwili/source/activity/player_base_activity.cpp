@@ -13,6 +13,7 @@
 #include "fragment/player_coin.hpp"
 #include "fragment/player_single_comment.hpp"
 #include "utils/config_helper.hpp"
+#include "utils/debug_log.hpp"
 #include "utils/dialog_helper.hpp"
 #include "utils/number_helper.hpp"
 #include "presenter/comment_related.hpp"
@@ -385,6 +386,9 @@ void BasePlayerActivity::setCommonData() {
     customEventSubscribeID = APP_E->subscribe([this](const std::string& event, void* data) {
         if (event == VideoView::QUALITY_CHANGE) {
             this->setVideoQuality();
+        } else if (event == VideoView::AUTO_QUALITY_DOWNGRADE) {
+            if (data && this->autoDowngradeForHardStall())
+                *static_cast<bool*>(data) = true;
         } else if (event == VideoView::SWITCH_TO_LAST) {
             // 历史播放进度储存在 SubtitleCore 中
             auto videoPage = SubtitleCore::instance().getSubtitleList();
@@ -456,21 +460,77 @@ void BasePlayerActivity::showCoinDialog(uint64_t aid) {
 void BasePlayerActivity::updateVideoLink() {
     // 设置视频加载后跳转的时间
     setProgress(MPVCore::instance().video_progress);
+    int requestedQuality = sessionQualityOverride > 0 ? sessionQualityOverride
+                                                      : defaultQuality;
 
     // dash
     if (!this->videoUrlResult.dash.video.empty()) {
         // dash格式的视频无需重复请求视频链接，这里简单的设置清晰度即可
-        videoUrlResult.quality = BasePlayerActivity::defaultQuality;
+        videoUrlResult.quality = requestedQuality;
         this->onVideoPlayUrl(videoUrlResult);
         return;
     }
 
     // flv
     if (dynamic_cast<PlayerSeasonActivity*>(this)) {
-        this->requestSeasonVideoUrl(episodeResult.bvid, episodeResult.cid);
+        this->requestSeasonVideoUrl(episodeResult.bvid, episodeResult.cid, true,
+                                    requestedQuality);
     } else {
-        this->requestVideoUrl(videoDetailResult.bvid, videoDetailPage.cid);
+        this->requestVideoUrl(videoDetailResult.bvid, videoDetailPage.cid, true,
+                              requestedQuality);
     }
+}
+
+std::string BasePlayerActivity::currentContentKey() const {
+    if (seasonInfo.season_id > 0)
+        return fmt::format("season:{}:{}:{}", seasonInfo.season_id, episodeResult.id,
+                           episodeResult.bvid);
+    return fmt::format("video:{}:{}", videoDetailResult.bvid, videoDetailPage.cid);
+}
+
+void BasePlayerActivity::resetSessionQualityOverride() {
+    sessionQualityOverride          = 0;
+    sessionQualityContentKey.clear();
+    hardAutoDowngradeApplied        = false;
+    autoDowngradePending            = false;
+    autoDowngradeFromQn             = 0;
+    autoDowngradeOldSession.clear();
+}
+
+bool BasePlayerActivity::autoDowngradeForHardStall() {
+    if (!activityShown || hardAutoDowngradeApplied) return false;
+    if (videoUrlResult.accept_quality.empty()) return false;
+
+    int fromQn = videoUrlResult.quality;
+    bool targetAvailable = false;
+    for (int q : videoUrlResult.accept_quality) {
+        if (q == 64) {
+            targetAvailable = true;
+            break;
+        }
+    }
+    if (!targetAvailable || fromQn <= 64) return false;
+
+    hardAutoDowngradeApplied   = true;
+    sessionQualityOverride     = 64;
+    sessionQualityContentKey   = currentContentKey();
+    autoDowngradePending       = true;
+    autoDowngradeFromQn        = fromQn;
+    autoDowngradeOldSession    = wiliwili::d27::currentSession();
+
+    char detail[256];
+    snprintf(detail, sizeof(detail),
+             "scene=auto_quality_downgrade reason=hard_stall from_qn=%d to_qn=64 "
+             "old_session=%s status=sent",
+             fromQn, autoDowngradeOldSession.c_str());
+    wiliwili::d27::log("CMD", detail);
+
+    this->updateVideoLink();
+
+    static const char* hint = "播放卡顿，已自动降低清晰度";
+    wiliwili::d27::log("UI", "health hint shown reason=hard action=auto_downgrade");
+    APP_E->fire(VideoView::HINT, (void*)hint);
+    return true;
 }
 
 void BasePlayerActivity::setVideoQuality() {
@@ -510,6 +570,9 @@ void BasePlayerActivity::setVideoQuality() {
                 return;
             }
 
+            sessionQualityOverride = 0;
+            sessionQualityContentKey.clear();
+            autoDowngradePending = false;
             this->updateVideoLink();
         },
         visibleSelected);
@@ -555,6 +618,9 @@ bool BasePlayerActivity::setQualityCodeForDebug(int qn) {
     if (ProgramConfig::instance().getCSRF().empty() && defaultQuality >= 32)
         return false;
 
+    sessionQualityOverride = 0;
+    sessionQualityContentKey.clear();
+    autoDowngradePending = false;
     this->updateVideoLink();
     return true;
 }
@@ -572,6 +638,11 @@ void BasePlayerActivity::setCommentMode() {
 
 void BasePlayerActivity::onVideoPlayUrl(const bilibili::VideoUrlResult& result) {
     brls::Logger::debug("onVideoPlayUrl quality: {}", result.quality);
+
+    // 新内容或用户手动选清晰度时清掉上一次的自动降级覆盖。
+    std::string contentKey = this->currentContentKey();
+    if (!sessionQualityContentKey.empty() && sessionQualityContentKey != contentKey)
+        this->resetSessionQualityOverride();
 
     if (result.accept_quality.empty() || result.accept_description.empty()) {
         // 通常是返回了其他报错信息, 比如验证码
@@ -686,6 +757,18 @@ void BasePlayerActivity::onVideoPlayUrl(const bilibili::VideoUrlResult& result) 
                                                         ? episodeResult.cid
                                                         : videoDetailPage.cid),
                                      std::to_string(result.quality));
+
+        if (autoDowngradePending) {
+            std::string newSession = wiliwili::d27::currentSession();
+            char detail[256];
+            snprintf(detail, sizeof(detail),
+                     "scene=auto_quality_downgrade reason=hard_stall from_qn=%d to_qn=64 "
+                     "old_session=%s new_session=%s status=ok",
+                     autoDowngradeFromQn, autoDowngradeOldSession.c_str(),
+                     newSession.c_str());
+            wiliwili::d27::log("CMD", detail);
+            autoDowngradePending = false;
+        }
     }
 
     if (!result.dash.video.empty()) {

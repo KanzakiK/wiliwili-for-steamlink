@@ -256,6 +256,31 @@ fi
 if grep -F "watchdog stall" "$RUN_DIR/wiliwili.log" >/dev/null 2>&1; then
     check_pattern wiliwili.log "health stall detected reason=hard" "compat 硬卡顿检测"
     check_pattern wiliwili.log "health hint shown reason=hard" "播放页硬卡顿提示"
+    if grep -F "scene=auto_quality_downgrade" "$RUN_DIR/wiliwili.log" >/dev/null 2>&1; then
+        if grep -F "scene=auto_quality_downgrade reason=hard_stall from_qn=" "$RUN_DIR/wiliwili.log" 2>/dev/null | grep -F "status=sent" >/dev/null 2>&1; then
+            pass "硬卡顿自动降级请求"
+        else
+            fail "硬卡顿自动降级请求缺失"
+        fi
+        if grep -F "scene=auto_quality_downgrade reason=hard_stall from_qn=" "$RUN_DIR/wiliwili.log" 2>/dev/null | grep -F "status=ok" >/dev/null 2>&1; then
+            pass "硬卡顿自动降级完成"
+        else
+            fail "硬卡顿自动降级完成缺失"
+        fi
+        AUTO_DOWNGRADE_QN=$(grep -F "scene=auto_quality_downgrade reason=hard_stall" "$RUN_DIR/wiliwili.log" 2>/dev/null |
+            sed -n 's/.* to_qn=\([^ ]*\).*/\1/p' | sort -u | head -1)
+        if [ "$AUTO_DOWNGRADE_QN" = "64" ]; then
+            pass "自动降级目标 qn=64"
+            check_pattern wiliwili.log "detail=cid=" "降级后仍有权威内容详情"
+            if grep -E "content start .* qn=64 " "$RUN_DIR/wiliwili.log" >/dev/null 2>&1; then
+                pass "新 session content start qn=64"
+            else
+                fail "新 session content start 未记录 qn=64"
+            fi
+        else
+            fail "自动降级目标错误: qn=$AUTO_DOWNGRADE_QN"
+        fi
+    fi
 else
     pass "本 run 无 watchdog 硬卡顿"
 fi

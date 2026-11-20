@@ -260,6 +260,7 @@ public:
     inline static const std::string CLIP_INFO      = "CLIP_INFO";
     inline static const std::string HIGHLIGHT_INFO = "HIGHLIGHT_INFO";
     inline static const std::string REAL_DURATION  = "REAL_DURATION";
+    inline static const std::string AUTO_QUALITY_DOWNGRADE = "AUTO_QUALITY_DOWNGRADE";
 
     // 用于指定 lastPlayedPosition 的值
     // 若无历史记录，则为 -1，若不使用历史记录的值，则为 -2

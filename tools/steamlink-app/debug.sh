@@ -32,6 +32,7 @@ WILI_FLAGS=()
 RUN_ID=""
 RUN_DIR=""
 STARTED=0
+COLLECTED=0
 
 usage() {
     sed -n '2,18p' "$0"
@@ -134,6 +135,8 @@ $SCP "$RUN_DIR/launch_cmdline.txt" "$DEVICE:/tmp/launch_cmdline.txt" >/dev/null 
 
 collect() {
     [ "$STARTED" -eq 1 ] || return 0
+    [ "$COLLECTED" -eq 1 ] && return 0
+    COLLECTED=1
     $SSH "killall wiliwili >/dev/null 2>&1 || true" >/dev/null 2>&1 || true
     sleep 1
     $SCP "$DEVICE:/tmp/wiliwili.log" "$RUN_DIR/wiliwili.log" 2>/dev/null || true
@@ -142,19 +145,24 @@ collect() {
     ARCHIVE_SIZE=$(du -sb "$RUN_DIR" 2>/dev/null | awk '{print $1}' || echo 0)
     echo "archive_size_bytes=${ARCHIVE_SIZE:-0}" >> "$RUN_DIR/manifest.txt"
 }
-trap collect EXIT INT TERM
+trap collect EXIT
+trap 'collect; exit 0' INT TERM
 
-# 先结束旧播放进程，避免它继续持有 /tmp/wiliwili.log 的 fd；
-# 再重启 shell，由 shell.sh 读取刚写入的 launch_cmdline.txt。
-$SSH "killall wiliwili >/dev/null 2>&1 || true; sleep 1; killall shell >/dev/null 2>&1 || true" >/dev/null 2>&1 || true
 STARTED=1
 
-deadline=$(( $(date +%s) + 30 ))
-while [ "$(date +%s)" -lt "$deadline" ]; do
-    if $SSH "grep -F 'run=$RUN_ID' /tmp/wiliwili.log >/dev/null 2>&1" 2>/dev/null; then
-        break
-    fi
-    sleep 1
+debug_started=0
+for attempt in 1 2 3; do
+    # 每轮都重新写入 launch_cmdline 并结束旧播放进程，避免 shell.sh 的
+    # 重启时序或残留 launch_cmdline 让调试进程没有真正启动。
+    $SCP "$RUN_DIR/launch_cmdline.txt" "$DEVICE:/tmp/launch_cmdline.txt" >/dev/null 2>&1 || continue
+    $SSH "killall wiliwili >/dev/null 2>&1 || true; sleep 1; killall shell >/dev/null 2>&1 || true" >/dev/null 2>&1 || true
+    for _tick in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+        if $SSH "grep -F 'run=$RUN_ID' /tmp/wiliwili.log >/dev/null 2>&1" 2>/dev/null; then
+            debug_started=1
+            break 2
+        fi
+        sleep 1
+    done
 done
 if ! $SSH "grep -F 'run=$RUN_ID' /tmp/wiliwili.log >/dev/null 2>&1" 2>/dev/null; then
     echo "设备日志未出现 run=$RUN_ID，启动可能失败；查看 $RUN_DIR" >&2
