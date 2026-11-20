@@ -247,34 +247,67 @@ int main(int argc, char* argv[]) {
             } else if (scene == "seek_forward" || scene == "seek_backward") {
                 std::string targetText = d27Arg(args, "target");
                 std::string deltaText = d27Arg(args, "delta");
-                if (targetText.empty() && deltaText.empty()) {
-                    d27Log("CMD", scene, "status=error missing_target_or_delta");
+                std::string targetMsText = d27Arg(args, "target_ms");
+                std::string deltaMsText = d27Arg(args, "delta_ms");
+                if (targetText.empty() && deltaText.empty() &&
+                    targetMsText.empty() && deltaMsText.empty()) {
+                    d27Log("CMD", scene,
+                           "status=error missing_target_or_delta_ms");
                     return EXIT_FAILURE;
                 }
-                double target = atof(targetText.c_str());
-                double delta = atof(deltaText.c_str());
-                bool useTarget = !targetText.empty();
+                /* S05：毫秒参数优先；旧秒参数仍可由旧脚本使用。 */
+                bool useTarget = !targetText.empty() || !targetMsText.empty();
+                bool useTargetMs = !targetMsText.empty();
+                bool useDeltaMs = !deltaMsText.empty();
+                double target = useTargetMs
+                                    ? (double)strtoll(targetMsText.c_str(), nullptr, 10) / 1000.0
+                                    : atof(targetText.c_str());
+                double delta = useDeltaMs
+                                   ? (double)strtoll(deltaMsText.c_str(), nullptr, 10) / 1000.0
+                                   : atof(deltaText.c_str());
+                long long targetMs = strtoll(targetMsText.c_str(), nullptr, 10);
+                long long deltaMs = strtoll(deltaMsText.c_str(), nullptr, 10);
                 d27ExpectPlaying(scene, timeout * 5,
-                                 [scene, target, delta, useTarget, timeout]() {
+                                 [scene, target, delta, useTarget, useTargetMs,
+                                  useDeltaMs, targetMs, deltaMs, timeout]() {
                     double expected = target;
                     if (useTarget) {
-                        char detail[128];
-                        snprintf(detail, sizeof(detail),
-                                 "mode=target target=%.3f status=sent", target);
+                        char detail[192];
+                        if (useTargetMs)
+                            snprintf(detail, sizeof(detail),
+                                     "mode=target target_ms=%lld status=sent",
+                                     targetMs);
+                        else
+                            snprintf(detail, sizeof(detail),
+                                     "mode=target target=%.3f status=sent", target);
                         d27Log("CMD", scene, detail);
-                        MPVCore::instance().seek((int64_t)target);
+                        MPVCore::instance().command_async(
+                            "seek", fmt::format("{:.3f}", target), "absolute");
                     } else {
                         double current = MPVCore::instance().playback_time;
                         double signedDelta =
                             scene == "seek_forward" ? delta : -delta;
+                        long long signedDeltaMs =
+                            useDeltaMs
+                                ? (scene == "seek_forward" ? deltaMs : -deltaMs)
+                                : (long long)(signedDelta * 1000.0);
                         expected = current + signedDelta;
                         if (expected < 0) expected = 0;
-                        char detail[192];
-                        snprintf(detail, sizeof(detail),
-                                 "mode=delta delta=%.3f current=%.3f expected=%.3f status=sent",
-                                 delta, current, expected);
+                        char detail[256];
+                        if (useDeltaMs)
+                            snprintf(detail, sizeof(detail),
+                                     "mode=delta delta_ms=%lld current=%.3f "
+                                     "expected=%.3f status=sent",
+                                     signedDeltaMs, current, expected);
+                        else
+                            snprintf(detail, sizeof(detail),
+                                     "mode=delta delta=%.3f current=%.3f "
+                                     "expected=%.3f status=sent",
+                                     delta, current, expected);
                         d27Log("CMD", scene, detail);
-                        MPVCore::instance().seekRelative((int64_t)signedDelta);
+                        MPVCore::instance().command_async(
+                            "seek", fmt::format("{:.3f}", signedDelta),
+                            "relative");
                     }
                     d27ExpectPosition(scene, expected, timeout * 5);
                 });

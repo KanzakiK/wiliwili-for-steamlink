@@ -171,12 +171,16 @@ else
                     check_both wiliwili.log "$PREFIX" "seek mode=" "CMD seek"
                     check_both wiliwili.log "$PREFIX" "seeked" "EVT seeked"
                     SCENE_ARGS=$(sed -n 's/^args=//p' "$RUN_DIR/manifest.txt" 2>/dev/null | head -1)
-                    if printf '%s' "$SCENE_ARGS" | grep -q 'target='; then
+                    if printf '%s' "$SCENE_ARGS" | grep -q 'target_ms='; then
+                        check_both wiliwili.log "$PREFIX" "scene=$SCENE mode=target" "seek target_ms mode"
+                    elif printf '%s' "$SCENE_ARGS" | grep -q 'delta_ms='; then
+                        check_both wiliwili.log "$PREFIX" "scene=$SCENE mode=delta" "seek delta_ms mode"
+                    elif printf '%s' "$SCENE_ARGS" | grep -q 'target='; then
                         check_both wiliwili.log "$PREFIX" "scene=$SCENE mode=target" "seek target mode"
                     elif printf '%s' "$SCENE_ARGS" | grep -q 'delta='; then
                         check_both wiliwili.log "$PREFIX" "scene=$SCENE mode=delta" "seek delta mode"
                     else
-                        fail "seek 场景缺少 target 或 delta"
+                        fail "seek 场景缺少 target/delta 或 target_ms/delta_ms"
                     fi
                     ;;
                 quality_change)
@@ -368,7 +372,11 @@ else
         check_pattern wiliwili.log "SYNC_TARGET" "pause 场景 SYNC_TARGET"
     fi
     if [ "$SCENE" = "seek_forward" ] || [ "$SCENE" = "seek_backward" ]; then
-        check_pattern wiliwili.log "target_ms=" "seek 场景毫秒目标"
+        if grep -E 'target_ms=|delta_ms=' "$RUN_DIR/wiliwili.log" >/dev/null 2>&1; then
+            pass "seek 场景毫秒目标"
+        else
+            fail "seek 场景缺少毫秒目标"
+        fi
     fi
 fi
 
