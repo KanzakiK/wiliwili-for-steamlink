@@ -1366,8 +1366,16 @@ static int try_failover(mpv_handle *ctx) {
     /* 故障时位置优先：heartbeat 的呈现位置比原始 open.start 更接近断点。 */
     double failoverStart = ctx->hbValid ? ctx->hbPresentationMs / 1000.0
                                         : ctx->resumePosition;
-    if (failoverStart <= 0.0)
+    const char *failoverSource = ctx->hbValid ? "heartbeat" : "resume_position";
+    if (failoverStart <= 0.0 && ctx->activeEpoch.active &&
+        ctx->activeEpoch.targetResolved && ctx->activeEpoch.targetMs > 0) {
+        failoverStart = (double)ctx->activeEpoch.targetMs / 1000.0;
+        failoverSource = "active_target";
+    }
+    if (failoverStart <= 0.0) {
         failoverStart = open_cmd_start(cmd);
+        failoverSource = "open_start";
+    }
     ctx->hasLastOpen = 1;
     ctx->playbackActive = 1;
     ctx->resumePosition = failoverStart;
@@ -1389,8 +1397,7 @@ static int try_failover(mpv_handle *ctx) {
             "failover to backup gen=%llu req=%llu remaining=%d "
             "target_ms=%.0f source=%s",
             (unsigned long long)failoverGen, (unsigned long long)failoverReq,
-            ctx->backupCount, failoverStart * 1000.0,
-            ctx->hbValid ? "heartbeat" : "resume_position");
+            ctx->backupCount, failoverStart * 1000.0, failoverSource);
     send_session_meta_and_open(ctx, failoverGen, failoverReq, openCmd,
                                "failover",
                                (int64_t)llround(failoverStart * 1000.0),

@@ -42,11 +42,17 @@ check_both() {
 }
 
 check_file manifest.txt
-check_file prestart.log
 check_file wiliwili.log
 check_file dmesg.before.txt
 check_file dmesg.after.txt
 check_file launch_cmdline.txt
+
+# 设备重启后 /tmp/wiliwili.log 本来就不存在，debug.sh 会生成空 prestart.log。
+if [ -f "$RUN_DIR/prestart.log" ]; then
+    pass "prestart.log 存在（空文件表示重启后的干净基线）"
+else
+    fail "prestart.log 缺失"
+fi
 
 RUN_ID=$(sed -n 's/^run_id=//p' "$RUN_DIR/manifest.txt" 2>/dev/null | head -1)
 SCENE=$(sed -n 's/^scene=//p' "$RUN_DIR/manifest.txt" 2>/dev/null | head -1)
