@@ -1,7 +1,22 @@
 wiliwili for Steam Link
 =======================
 
-1. Copy the "wiliwili" directory in this package to /home/apps/ on Steam Link.
+USB installation (normal users)
+-------------------------------
+1. Use the -usb.zip package. Format a USB drive as FAT32 and extract the
+   archive to the USB drive root so it contains:
+     steamlink/apps/wiliwili/toc.txt
+     steamlink/apps/wiliwili/wiliwili.sh
+2. Power off the Steam Link, insert the USB drive, then power it back on.
+3. Wait for the system to copy the app to /home/apps/wiliwili and show the
+   wiliwili icon in the main menu.
+4. Remove the USB drive after installation. Leaving it plugged in will make
+   the system overwrite the installed app again on every boot.
+
+SSH/manual installation
+-----------------------
+1. Use the .tar.gz package and copy the "wiliwili" directory in this package
+   to /home/apps/ on Steam Link.
 2. Make the launcher executable:
      chmod 755 /home/apps/wiliwili/wiliwili.sh /home/apps/wiliwili/bin/*
 3. Restart the Steam Link main menu or reboot the device.
