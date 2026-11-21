@@ -31,7 +31,7 @@ static bool debugFaultEnabled(const char* name) {
 }
 
 constexpr int kFrameMs = 50;
-constexpr double kDefaultSyncOffsetMs = 25.0;
+constexpr double kDefaultSyncOffsetMs = 300.0;
 constexpr int kSinkRateHz = 48000; /* SLAudio.h: native frequency is 48000 Hz */
 constexpr std::size_t kPcmDumpLimitBytes = 8u * 1024u * 1024u;
 constexpr size_t kPrerollLimit = 2 * 1024 * 1024;
@@ -639,6 +639,10 @@ bool AudioPipeline::ensureStream() {
 bool AudioPipeline::seekInternal(double targetSeconds) {
     bool ok = true;
     const bool forcedSeekFailure = debugFaultEnabled("SL_DEBUG_FAIL_AUDIO_SEEK");
+    const auto seekStartMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    sl::d27Log("AUDIO", "seek demux enter seq=%llu target=%.3f",
+               (unsigned long long)ack_.sequence.load(), targetSeconds);
 
     if (forcedSeekFailure) {
         sl::d27Log("AUDIO", "debug fault audio-seek failed seq=%llu target=%.3f",
@@ -665,6 +669,11 @@ bool AudioPipeline::seekInternal(double targetSeconds) {
             sl::d27Log("AUDIO", "audio seek failed, possible range window miss");
         }
     }
+    sl::d27Log("AUDIO", "seek demux done seq=%llu ok=%d elapsed_ms=%lld",
+               (unsigned long long)ack_.sequence.load(), ok ? 1 : 0,
+               (long long)(std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch()).count() -
+                   seekStartMs));
 
     if (decoder_)
         avcodec_flush_buffers(decoder_);

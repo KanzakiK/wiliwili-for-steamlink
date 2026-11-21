@@ -30,6 +30,14 @@ constexpr size_t kStreamBackKeep = 512 * 1024;
 constexpr int kDownloadMaxRetries = 2;
 constexpr int kDownloadRetryBaseDelayMs = 250;
 
+int httpReadTimeoutMs() {
+    const char* value = std::getenv("SL_HTTP_READ_TIMEOUT_MS");
+    int timeout = value ? atoi(value) : 15000;
+    if (timeout < 1000) timeout = 1000;
+    if (timeout > 60000) timeout = 60000;
+    return timeout;
+}
+
 bool isRemoteUrl(const std::string& url) {
     return url.compare(0, 7, "http://") == 0 || url.compare(0, 8, "https://") == 0;
 }
@@ -57,7 +65,8 @@ public:
         : url_(std::move(url)), referrer_(std::move(referrer)),
           userAgent_(std::move(userAgent)),
           errorClock_(errorClock),
-          debug_(std::getenv("SL_HTTP_DEBUG") != nullptr) {}
+          debug_(std::getenv("SL_HTTP_DEBUG") != nullptr),
+          readTimeoutMs_(httpReadTimeoutMs()) {}
 
     ~Downloader() { join(); }
 
@@ -143,8 +152,27 @@ public:
             sl::d27Log("HTTP", "read wait size=%d pos=%lld end=%lld base=%lld",
                        size, (long long)readPos_, (long long)endOffset_,
                        (long long)baseOffset_);
-        while (!stop_ && !error_ && !eof_ && endOffset_ < readPos_ + size)
-            cond_.wait(lock);
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(readTimeoutMs_);
+        while (!stop_ && !error_ && !eof_ && endOffset_ < readPos_ + size) {
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - std::chrono::steady_clock::now());
+            if (remaining.count() <= 0) {
+                sl::d27Log("HTTP",
+                           "read timeout size=%d pos=%lld end=%lld waited_ms=%d",
+                           size, (long long)readPos_, (long long)endOffset_,
+                           readTimeoutMs_);
+                if (errorClock_)
+                    errorClock_->store(steadyNowMs(), std::memory_order_relaxed);
+                error_ = true;
+                errorMessage_ = "read timeout";
+                eof_ = true;
+                cond_.notify_all();
+                return AVERROR(EIO);
+            }
+            cond_.wait_for(lock, std::chrono::milliseconds(
+                std::min<int64_t>(remaining.count(), 1000)));
+        }
 
         if (error_ || stop_)
             return AVERROR_EXIT;
@@ -480,6 +508,7 @@ private:
     bool expectRangeStatus_ = false;
     bool rejectRangeBody_ = false;
     bool debug_ = false;
+    int readTimeoutMs_ = 15000;
 };
 
 /* ---------------- HttpSource ---------------- */

@@ -8,7 +8,7 @@
 # 用法：
 #   DEVICE=root@<ip> PASS=<password> sh tools/steamlink-app/debug.sh \
 #     --content video:BV1Nvx16TEzY --scene seek_forward \
-#     --arg target_ms=120000 --seconds 30 --sync-offset-ms 25 --diag --sync-debug
+#     --arg target_ms=120000 --seconds 30 --sync-offset-ms 300 --diag --sync-debug
 #     --health-force --health-window-ms 1000 --health-progress-ms 100000
 #
 # 注意：本脚本不改正式启动入口；wiliwili.sh 仍负责清空 /tmp/wiliwili.log。
@@ -21,7 +21,7 @@ PASS=${PASS:-}
 CONTENT=${CONTENT:-}
 SCENE=${SCENE:-}
 RUN_SECONDS=${RUN_SECONDS:-30}
-SYNC_OFFSET_MS=${SYNC_OFFSET_MS:-25}
+SYNC_OFFSET_MS=${SYNC_OFFSET_MS:-300}
 HEALTH_FORCE=0
 HEALTH_WINDOW_MS=${HEALTH_WINDOW_MS:-}
 HEALTH_PROGRESS_MS=${HEALTH_PROGRESS_MS:-}
@@ -99,7 +99,7 @@ SCP="sshpass -p $PASS scp -o StrictHostKeyChecking=no"
     echo "scene=$SCENE"
     echo "args=${SCENE_ARGS[*]:-}"
     echo "flags=${WILI_FLAGS[*]:-}"
-    echo "sync_offset_ms=${SYNC_OFFSET_MS:-25}"
+    echo "sync_offset_ms=${SYNC_OFFSET_MS:-300}"
     echo "health_force=$HEALTH_FORCE"
     echo "health_window_ms=${HEALTH_WINDOW_MS:-}"
     echo "health_progress_ms=${HEALTH_PROGRESS_MS:-}"
