@@ -689,20 +689,19 @@ bool AudioPipeline::seekInternal(double targetSeconds) {
         stream_ = nullptr;
     }
     if (forcedSeekFailure) {
-        sl::d27Log("AUDIO", "debug fault audio-seek aborted seq=%llu",
+        sl::d27Log("AUDIO",
+                   "debug fault audio-seek aborted seq=%llu sink_queue=stale",
                    (unsigned long long)ack_.sequence.load());
-        sinkQueueSamples_.store(0);
         return false;
     }
     if (debugFaultEnabled("SL_DEBUG_FAIL_AUDIO_CREATE")) {
-        sl::d27Log("AUDIO", "debug fault audio-create failed seq=%llu",
+        sl::d27Log("AUDIO",
+                   "debug fault audio-create failed seq=%llu sink_queue=stale",
                    (unsigned long long)ack_.sequence.load());
-        sinkQueueSamples_.store(0);
         return false;
     }
     if (!ensureStream()) {
-        sl::d27Log("AUDIO", "seek stream recreate failed");
-        sinkQueueSamples_.store(0);
+        sl::d27Log("AUDIO", "seek stream recreate failed sink_queue=stale");
         return false;
     }
     uint32_t queued = SLAudio_GetQueuedAudioSamples(stream_);

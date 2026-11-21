@@ -63,6 +63,7 @@ FORCE_FAILOVER=$(sed -n 's/^force_failover=//p' "$RUN_DIR/manifest.txt" 2>/dev/n
 FORCE_WATCHDOG=$(sed -n 's/^force_watchdog=//p' "$RUN_DIR/manifest.txt" 2>/dev/null | head -1)
 PRIMARY_ERROR=$(sed -n 's/^primary_error=//p' "$RUN_DIR/manifest.txt" 2>/dev/null | head -1)
 FAIL_QUALITY_START=$(sed -n 's/^fail_quality_start=//p' "$RUN_DIR/manifest.txt" 2>/dev/null | head -1)
+NO_HISTORY=$(sed -n 's/^no_history=//p' "$RUN_DIR/manifest.txt" 2>/dev/null | head -1)
 EXPECT_FAILURE=0
 if [ "$FAIL_AUDIO_SEEK" = "1" ] || [ "$FAIL_AUDIO_CREATE" = "1" ] || [ "$FAIL_QUALITY_START" = "1" ]; then
     EXPECT_FAILURE=1
@@ -84,7 +85,7 @@ for key in created_at collected_at archive_size_bytes; do
         fail "manifest 缺少 $key"
     fi
 done
-for key in no_audio fail_audio_seek fail_audio_create force_failover force_watchdog primary_error fail_quality_start; do
+for key in no_audio fail_audio_seek fail_audio_create force_failover force_watchdog primary_error fail_quality_start no_history; do
     if grep -q "^$key=" "$RUN_DIR/manifest.txt" 2>/dev/null; then
         pass "manifest 含 $key"
     else
@@ -209,6 +210,31 @@ else
                 fail "cid/qn 不一致: ui=$UI_CID/$UI_QN meta=$META_CID/$META_QN loadfile=$LOAD_CID/$LOAD_QN"
             fi
 
+            if [ "${NO_HISTORY:-0}" = "1" ]; then
+                FIRST_CONTENT_START=$(grep -F "content start" "$RUN_DIR/wiliwili.log" 2>/dev/null |
+                    head -1)
+                if printf '%s\n' "$FIRST_CONTENT_START" | grep -F " start=0" >/dev/null 2>&1; then
+                    pass "no_history 首条 content start start=0"
+                else
+                    fail "no_history 首条 content start 缺少 start=0"
+                fi
+                check_both wiliwili.log "debug no_history=1" "status=sent" "no_history UI 标记"
+                check_both wiliwili.log "open target_ms=0" "source=sync_meta" "no_history open 目标为 0"
+                if grep -F "Restore video position" "$RUN_DIR/wiliwili.log" >/dev/null 2>&1; then
+                    fail "no_history run 仍恢复历史进度"
+                else
+                    pass "no_history run 未恢复历史进度"
+                fi
+                FIRST_PLAY_LINE=$(grep -nF "playback start status=ok" "$RUN_DIR/wiliwili.log" 2>/dev/null |
+                    head -1 | cut -d: -f1)
+                if [ -n "$FIRST_PLAY_LINE" ] && \
+                   head -n "$FIRST_PLAY_LINE" "$RUN_DIR/wiliwili.log" | grep -F "command seek" >/dev/null 2>&1; then
+                    fail "no_history run 首播前有 seek"
+                else
+                    pass "no_history run 首播前无 seek"
+                fi
+            fi
+
             case "$SCENE" in
                 seek_forward|seek_backward|pause_seek|continuous_seek)
                     check_both wiliwili.log "$PREFIX" "seek mode=" "CMD seek"
@@ -256,7 +282,9 @@ else
                                 check_both wiliwili.log "[run=$RUN_ID][session=$OLD_SESSION]" "content start" "旧 session content start"
                             fi
                         fi
-                        if [ -n "$UI_QN" ] && [ "$UI_QN" = "$REQUESTED_QN" ]; then
+                        if [ "$FAIL_QUALITY_START" = "1" ]; then
+                            pass "升档失败 run 跳过首 session qn 一致性，改验最终 qn=64"
+                        elif [ -n "$UI_QN" ] && [ "$UI_QN" = "$REQUESTED_QN" ]; then
                             pass "新 session qn=$UI_QN 与请求一致"
                         else
                             fail "新 session qn=$UI_QN 与请求 qn=$REQUESTED_QN 不一致"
@@ -440,10 +468,14 @@ else
     pass "本 run 无 watchdog 硬卡顿"
 fi
 
-# D28：统一日志中的同步事件必须带 epoch；START 不得早于 READY。
+# D28：统一日志中的同步事件必须带 epoch，并按 epoch 校验 READY/START。
 SYNC_COUNT=$(grep -c -E 'SYNC_(BEGIN|TARGET|READY|START|DRIFT|END)' "$RUN_DIR/wiliwili.log" 2>/dev/null || true)
 if [ "${SYNC_COUNT:-0}" -eq 0 ]; then
-    pass "本 run 无 D28 SYNC_* 日志"
+    if [ "$SCENE" = "page_nav" ] || [ "$SCENE" = "none" ]; then
+        pass "非播放场景无 SYNC_* 属预期"
+    else
+        fail "D28 run 缺少任何 SYNC_* 日志"
+    fi
 else
     pass "D28 SYNC_* 日志数量=$SYNC_COUNT"
     SYNC_NO_EPOCH=$(grep -E 'SYNC_(BEGIN|TARGET|READY|START|DRIFT|END)' "$RUN_DIR/wiliwili.log" 2>/dev/null |
@@ -460,15 +492,125 @@ else
     else
         fail "有 $SYNC_END_NO_STATUS 行 SYNC_END 缺少 status"
     fi
-    READY_LINE=$(grep -nF 'SYNC_READY' "$RUN_DIR/wiliwili.log" 2>/dev/null |
-        head -1 | cut -d: -f1)
-    START_LINE=$(grep -nE 'SYNC_START ' "$RUN_DIR/wiliwili.log" 2>/dev/null |
-        head -1 | cut -d: -f1)
-    if [ -z "$START_LINE" ] || { [ -n "$READY_LINE" ] && [ "$READY_LINE" -le "$START_LINE" ]; }; then
-        pass "SYNC_START 不早于 SYNC_READY"
+
+    SYNC_BEGIN_COUNT=$(grep -cF 'SYNC_BEGIN' "$RUN_DIR/wiliwili.log" 2>/dev/null || true)
+    if [ "${SYNC_BEGIN_COUNT:-0}" -eq 0 ]; then
+        SYNC_META_COUNT=$(grep -cF 'sync_epoch=' "$RUN_DIR/wiliwili.log" 2>/dev/null || true)
+        SYNC_DIAG_COUNT=$(grep -c -E 'SYNC_(READY|START|DRIFT)' "$RUN_DIR/wiliwili.log" 2>/dev/null || true)
+        if [ "${SYNC_META_COUNT:-0}" -eq 0 ] && [ "${SYNC_DIAG_COUNT:-0}" -gt 0 ]; then
+            pass "旧 compat + 新 daemon 兼容诊断模式（无 SYNC_BEGIN）"
+        else
+            fail "D28 run 缺少 SYNC_BEGIN"
+        fi
     else
-        fail "SYNC_START 早于 SYNC_READY"
+        SYNC_ORDER_ERRORS=$(awk '
+            function field(s, key,    n, a, i, k) {
+                k = key "="
+                n = split(s, a, / /)
+                for (i = 1; i <= n; i++)
+                    if (substr(a[i], 1, length(k)) == k)
+                        return substr(a[i], length(k) + 1)
+                return ""
+            }
+            function err(msg) { errors++; print "epoch=" e ": " msg }
+            /\[SYNC\]/ {
+                s = $0
+                e = field(s, "epoch")
+                if (e == "") next
+                if (index(s, "SYNC_BEGIN")) {
+                    if (seen[e] && !ended[e]) err("重复 SYNC_BEGIN")
+                    seen[e] = 1; ended[e] = 0; readyPlay[e] = 0
+                    readyPause[e] = 0; started[e] = 0; target[e] = ""
+                } else if (index(s, "SYNC_TARGET")) {
+                    if (!seen[e]) err("SYNC_TARGET 先于 SYNC_BEGIN")
+                    else target[e] = field(s, "target_ms")
+                } else if (index(s, "SYNC_READY")) {
+                    if (!seen[e]) { err("SYNC_READY 先于 SYNC_BEGIN"); next }
+                    d = field(s, "desired")
+                    if (d == "") {
+                        p = field(s, "phase")
+                        if (p == "paused") d = "pause"
+                        else if (p == "running") d = "play"
+                    }
+                    if (d == "play") { readyPlay[e] = 1; readyPause[e] = 0 }
+                    else if (d == "pause") { readyPause[e] = 1; readyPlay[e] = 0 }
+                    else err("SYNC_READY 缺少 desired/phase")
+                } else if (index(s, "SYNC_START_PREPARE")) {
+                    next
+                } else if (s ~ /SYNC_START[[:space:]]/ || s ~ /SYNC_START$/) {
+                    if (!seen[e]) err("SYNC_START 先于 SYNC_BEGIN")
+                    else if (!readyPlay[e]) err("SYNC_START 早于 PLAY SYNC_READY")
+                    else {
+                        started[e]++
+                        st = field(s, "target_ms")
+                        if (target[e] != "" && st != "" && st != target[e])
+                            err("SYNC_START target_ms=" st " 与 SYNC_TARGET " target[e] " 不一致")
+                        readyPlay[e] = 0
+                    }
+                } else if (index(s, "SYNC_END")) {
+                    if (!seen[e]) err("SYNC_END 先于 SYNC_BEGIN")
+                    ended[e] = 1
+                }
+            }
+        ' "$RUN_DIR/wiliwili.log" | tr '\n' ';')
+        if [ -z "$SYNC_ORDER_ERRORS" ]; then
+            pass "逐 epoch READY/START 顺序正确"
+        else
+            fail "逐 epoch READY/START 顺序错误: $SYNC_ORDER_ERRORS"
+        fi
     fi
+
+    case "$SCENE" in
+        pause_resume|pause_repeat|pause_long|pause_race|pause_seek|pause_quality)
+            # pause_seek/pause_quality 会在暂停中创建新 epoch；冻结目标必须取
+            # resume 所复用那个最新 epoch，不能用被替代 epoch 的旧 SYNC_TARGET。
+            LATEST_BEGIN=$(grep -F 'SYNC_BEGIN' "$RUN_DIR/wiliwili.log" 2>/dev/null | tail -1)
+            LATEST_EPOCH=$(printf '%s\n' "$LATEST_BEGIN" |
+                sed -n 's/.* epoch=\([^ ]*\).*/\1/p')
+            FROZEN_MS=""
+            if [ -n "$LATEST_EPOCH" ]; then
+                FROZEN_MS=$(grep -F "SYNC_TARGET epoch=$LATEST_EPOCH" "$RUN_DIR/wiliwili.log" 2>/dev/null |
+                    tail -1 | sed -n 's/.* target_ms=\([^ ]*\).*/\1/p')
+                if [ -z "$FROZEN_MS" ]; then
+                    FROZEN_MS=$(printf '%s\n' "$LATEST_BEGIN" |
+                        sed -n 's/.* target_ms=\([^ ]*\).*/\1/p')
+                fi
+            fi
+            if [ "$FROZEN_MS" = "pending" ]; then
+                FROZEN_MS=""
+            fi
+            if [ -n "$FROZEN_MS" ]; then
+                RESUME_LINE=$(grep -nF 'resume status=sent' "$RUN_DIR/wiliwili.log" 2>/dev/null |
+                    tail -1 | cut -d: -f1)
+                RESUME_GEN=$(sed -n "${RESUME_LINE}p" "$RUN_DIR/wiliwili.log" 2>/dev/null |
+                    sed -n 's/.*\[gen=\([^]]*\)\].*/\1/p')
+                if [ -z "$RESUME_LINE" ] || [ -z "$RESUME_GEN" ]; then
+                    fail "pause 场景缺少 resume 请求行或代次"
+                else
+                    RESUME_SEEK=$(sed -n "${RESUME_LINE},\$p" "$RUN_DIR/wiliwili.log" 2>/dev/null |
+                        grep -F "[gen=$RESUME_GEN]" |
+                        grep -F 'video seek target=' | tail -1 |
+                        sed -n 's/.*video seek target=\([^ ]*\).*/\1/p')
+                    if [ -z "$RESUME_SEEK" ]; then
+                        fail "resume 后缺少共享 demux seek"
+                    elif awk -v want="$FROZEN_MS" -v got="$RESUME_SEEK" \
+                        'BEGIN { d = got * 1000 - want; if (d < 0) d = -d; exit !(d <= 1.5) }'; then
+                        pass "resume 视频 seek 使用冻结目标 ${FROZEN_MS}ms"
+                    else
+                        fail "resume 视频 seek=$RESUME_SEEK 与冻结目标 ${FROZEN_MS}ms 不一致"
+                    fi
+                    if grep -F "[req=$RESUME_REQ]" "$RUN_DIR/wiliwili.log" 2>/dev/null |
+                       grep -F 'audio seek queued' >/dev/null 2>&1; then
+                        fail "resume 后重复 seek 音频"
+                    else
+                        pass "resume 未重复 seek 音频"
+                    fi
+                fi
+            else
+                pass "本场景无 SYNC_TARGET，跳过 resume 目标一致性检查"
+            fi
+            ;;
+    esac
     if [ "$SCENE" = "pause_resume" ] || [ "$SCENE" = "pause_repeat" ] || \
        [ "$SCENE" = "pause_long" ]; then
         check_pattern wiliwili.log "SYNC_TARGET" "pause 场景 SYNC_TARGET"
@@ -506,6 +648,9 @@ if [ "$FORCE_FAILOVER" = "1" ]; then
     if grep -F "failover to backup gen=" "$RUN_DIR/wiliwili.log" |
        grep -E "source=(heartbeat|resume_position|active_target)" >/dev/null 2>&1; then
         pass "failover 使用故障时位置"
+    elif grep -F "failover to backup gen=" "$RUN_DIR/wiliwili.log" |
+         grep -E "target_ms=0 source=open_start" >/dev/null 2>&1; then
+        pass "failover 冷启动无位置时回退 open_start=0"
     else
         fail "failover 未使用故障时位置"
     fi
@@ -543,7 +688,7 @@ if [ "$FAIL_QUALITY_START" = "1" ]; then
     else
         fail "升档失败自动降级请求"
     fi
-    if grep -E "scene=auto_quality_downgrade reason=quality_change_failure from_qn=(80|112|116) to_qn=64" "$RUN_DIR/wiliwili.log" | grep -F "status=ok" >/dev/null 2>&1; then
+    if grep -E "scene=auto_quality_downgrade reason=quality_change_failure .* to_qn=64 .* status=ok" "$RUN_DIR/wiliwili.log" >/dev/null 2>&1; then
         pass "升档失败自动降级完成"
     else
         fail "升档失败自动降级完成"

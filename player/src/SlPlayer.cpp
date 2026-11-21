@@ -367,7 +367,12 @@ struct Player::Impl {
         } else {
             /* 音频要等视频首帧重建并对齐后再恢复，避免声音先跑出去。 */
             if (paused_.load() || pauseFlush_.load() || pausePending_.load()) {
-                resumeTarget_.store(pauseTargetMs_.load() / 1000.0);
+                /* D28：已确定的 target_ms 是唯一权威；旧 compat 没有 meta
+                 * 时才回退本地 pause 采样值。 */
+                double target = sync.targetMs >= 0
+                                    ? (double)sync.targetMs / 1000.0
+                                    : pauseTargetMs_.load() / 1000.0;
+                resumeTarget_.store(target);
                 resumeSeek_ = true;
                 resumeInProgress_ = true;
             }
@@ -1144,8 +1149,8 @@ void Player::Impl::run() {
         syncState_.phase.store(static_cast<int>(SyncPhase::Running));
         syncEvent(spec, syncState_.epoch.load(),
                   lastTimelineRequestId_.load(), "SYNC_READY",
-                  "ready_mask=%u phase=running present=%.1f preroll_ms=%.1f "
-                  "reason=%s",
+                  "ready_mask=%u desired=play phase=running present=%.1f "
+                  "preroll_ms=%.1f reason=%s",
                   syncState_.readyMask.load(), presentationMs,
                   audio_.prerollMs(),
                   reason.empty() ? "-" : reason.c_str());
@@ -1304,8 +1309,9 @@ void Player::Impl::run() {
                 syncReadyLogged = true;
                 syncEvent(spec, syncState_.epoch.load(),
                           pauseRequestId_.load(), "SYNC_READY",
-                          "ready_mask=%u phase=paused target_ms=%.0f "
-                          "sink_queued=%u decode_allowed=%d audible=%d",
+                          "ready_mask=%u desired=pause phase=paused "
+                          "target_ms=%.0f sink_queued=%u decode_allowed=%d "
+                          "audible=%d",
                           syncState_.readyMask.load(), at * 1000.0,
                           audio_.sinkQueueSamples(),
                           audio_.decodeAllowed() ? 1 : 0,
@@ -1651,17 +1657,30 @@ void Player::Impl::run() {
                                        seekDisplayTargetMs, frameMs, queuedNow);
                     }
 
-                    /* 恢复完成的定义：视频首帧已重建、音频启动已安排；
-                     * 音频不可用时不受该条件阻塞，避免永远不发 Resumed。 */
-                    if (pendingResumeEvent && firstFrameAfterSeekRecorded &&
-                        (!audioReady || audioScheduled)) {
+                    /* watchdog 的 transition 保护只覆盖“视频还没恢复出首帧”。
+                     * 首帧已到且目标不是 pause 时必须解除，否则音频队列停滞
+                     * 导致 audioScheduled 一直为 false 时，resumeInProgress_
+                     * 会永久把 inTransition 置 1，D22 完全不接管。
+                     * EVT Resumed 仍保留原来的音频调度等待条件。 */
+                    if (!targetPaused_.load() && firstFrameAfterSeekRecorded &&
+                        resumeInProgress_.exchange(false) && playDiag) {
+                        sl::d27Log("PLAYER",
+                                   "diag resume transition cleared first=%.0f "
+                                   "queued=%u audio_scheduled=%d",
+                                   firstFramePtsAfterSeekMs, queuedNow,
+                                   audioScheduled ? 1 : 0);
+                    }
+
+                    /* Resumed 是播放线程已恢复读取/呈现的状态事件，只等视频首帧。
+                     * 音频启动仍由队列稳定 + 对齐条件单独判断，不能让音频队列
+                     * 停滞反过来把 UI 永久留在 paused 状态。 */
+                    if (pendingResumeEvent && firstFrameAfterSeekRecorded) {
                         if (!targetPaused_.load()) {
                             emit(EventType::Resumed, std::string(),
                                  pendingResumeRequestId);
                         }
                         pendingResumeRequestId = 0;
                         pendingResumeEvent = false;
-                        resumeInProgress_ = false;
                     }
 
                     if (audioReady && !audioScheduled && !audioPendingPosition &&

@@ -116,6 +116,8 @@ public:
     double submittedMs() const;
     double delayMs() const;
     double prerollMs() const;
+    /* 最近一次 SLAudio_GetQueuedAudioSamples() 的实际结果；seek/stream
+     * 失败时保留旧值，不用 0 伪装硬件队列为空。 */
     std::uint32_t sinkQueueSamples() const { return sinkQueueSamples_.load(); }
     uint32_t queuedSamples() const { return lastQueued_; }
     bool decodeAllowed() const { return !paused_.load(); }

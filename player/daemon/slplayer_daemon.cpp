@@ -97,6 +97,22 @@ static sl::SyncContext syncContextFromMeta(const sl_sync_meta_t& meta,
     return context;
 }
 
+/* D28：有 meta 且目标已确定时，毫秒字段是唯一权威；-1 表示 pause 目标尚未
+ * 采集，旧秒数只服务无 sync meta 的旧 compat。 */
+static double resolveCommandTargetSeconds(bool hasSync,
+                                          const sl_sync_meta_t& meta,
+                                          double legacySeconds,
+                                          const char** source) {
+    if (hasSync && meta.target_ms >= 0) {
+        if (source)
+            *source = "sync_meta";
+        return (double)meta.target_ms / 1000.0;
+    }
+    if (source)
+        *source = "legacy_seconds";
+    return legacySeconds;
+}
+
 static void daemonLogV(const char* source, std::uint64_t req,
                        const char* fmt, va_list args) {
     char message[2048];
@@ -530,7 +546,8 @@ int main(int argc, char** argv) {
             sl::DebugLogContext context;
             context.generation = gen;
             context.requestId = req;
-            if (sessionRc == 1) {
+            bool hasIdentity = sl_session_meta_has_identity(&meta);
+            if (sessionRc == 1 || hasIdentity) {
                 storeSessionMeta(gen, meta);
                 context = debugContextFromMeta(gen, meta, req);
                 daemonLogContext(context, "meta ok %s",
@@ -582,7 +599,12 @@ int main(int argc, char** argv) {
                 spec.sync = syncContextFromMeta(openSync, requestId);
             spec.videoUrl = f[3];
             spec.referrer = f[4];
-            spec.startSeconds = atof(f[5].c_str());
+            const char* openStartSource = "legacy_seconds";
+            spec.startSeconds = resolveCommandTargetSeconds(
+                hasOpenSync, openSync, atof(f[5].c_str()), &openStartSource);
+            daemonLogReq(requestId,
+                         "open target_ms=%.0f source=%s status=sent",
+                         spec.startSeconds * 1000.0, openStartSource);
             spec.endSeconds = atof(f[6].c_str());
             for (size_t i = 7; i < f.size(); ++i) {
                 if (!f[i].empty()) spec.audioUrls.push_back(f[i]);
@@ -649,8 +671,15 @@ int main(int argc, char** argv) {
                 sl::setDebugLogContext(context);
                 sl::SyncContext sync;
                 if (hasSeekSync) sync = syncContextFromMeta(seekSync, req);
-                daemonLogReq(req, "seek target=%.3f status=sent", atof(f[3].c_str()));
-                player.seek(atof(f[3].c_str()), req, sync);
+                const char* seekTargetSource = "legacy_seconds";
+                double targetSeconds = resolveCommandTargetSeconds(
+                    hasSeekSync, seekSync, atof(f[3].c_str()),
+                    &seekTargetSource);
+                daemonLogReq(req,
+                             "seek target=%.3f target_ms=%.0f source=%s status=sent",
+                             targetSeconds, targetSeconds * 1000.0,
+                             seekTargetSource);
+                player.seek(targetSeconds, req, sync);
             }
         } else if (cmd == SL_CMD_STOP) {
             if (!commandGenerationMatches(f)) continue;

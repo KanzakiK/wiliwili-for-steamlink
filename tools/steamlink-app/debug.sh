@@ -35,6 +35,7 @@ FORCE_FAILOVER=0
 FORCE_WATCHDOG=0
 PRIMARY_ERROR=0
 FAIL_QUALITY_START=0
+NO_HISTORY=0
 DEBUG_ARGS=()
 SCENE_ARGS=()
 WILI_FLAGS=()
@@ -52,7 +53,13 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --content) CONTENT=${2:-}; shift 2 ;;
         --scene) SCENE=${2:-}; shift 2 ;;
-        --arg) SCENE_ARGS+=("${2:-}"); shift 2 ;;
+        --arg)
+            SCENE_ARGS+=("${2:-}")
+            for _d27_arg in $(printf '%s' "${2:-}" | tr ';' '\n'); do
+                if [ "$_d27_arg" = "no_history=1" ]; then NO_HISTORY=1; fi
+            done
+            shift 2
+            ;;
         --seconds) RUN_SECONDS=${2:-30}; shift 2 ;;
         --sync-offset-ms) SYNC_OFFSET_MS=${2:-}; shift 2 ;;
         --health-force) HEALTH_FORCE=1; shift ;;
@@ -106,6 +113,7 @@ SCP="sshpass -p $PASS scp -o StrictHostKeyChecking=no"
     echo "force_watchdog=$FORCE_WATCHDOG"
     echo "primary_error=$PRIMARY_ERROR"
     echo "fail_quality_start=$FAIL_QUALITY_START"
+    echo "no_history=$NO_HISTORY"
     echo "created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "host_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "device_time=$($SSH date 2>/dev/null || echo unavailable)"

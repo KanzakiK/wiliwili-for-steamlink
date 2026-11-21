@@ -23,6 +23,7 @@ extern "C" {
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <ctype.h>
 
 /* socket 路径。daemon bind，兼容层 connect。
  * 用环境变量 SL_IPC_SOCKET 可覆盖（多实例/测试用）。 */
@@ -104,6 +105,12 @@ static inline void sl_session_meta_clear(sl_session_meta_t *meta) {
         memset(meta, 0, sizeof(*meta));
 }
 
+/* 内容身份与 debug run/session 分离：正常启动只有 content/id/bv/cid/qn，
+ * debug run 才额外带 run/session。只要 content+id 存在即可作为身份 meta。 */
+static inline int sl_session_meta_has_identity(const sl_session_meta_t *meta) {
+    return meta && meta->content[0] && meta->id[0];
+}
+
 /* 解析 key=value 列表：extra 用 ','，IPC meta 参数用 TAB。
  * 未知键一律忽略；返回 1 表示四个字段齐全，0 表示缺字段，-1 表示非法。 */
 static inline int sl_session_meta_parse_kv_list(const char *list, char sep,
@@ -167,23 +174,35 @@ static inline int sl_session_meta_parse_extra(const char *extra, sl_session_meta
     return meta->run[0] && meta->session[0] && meta->content[0] && meta->id[0] ? 1 : 0;
 }
 
-/* 生成 meta 命令参数字段；返回写入长度，cap 不足时返回 0。 */
+static inline int append_meta_field(char *dst, size_t cap, size_t *offset,
+                                    const char *key, const char *value) {
+    if (!value || !*value)
+        return 0;
+    size_t left = cap > *offset ? cap - *offset : 0;
+    int n = snprintf(dst + *offset, left, "%s%s=%s", *offset ? "\t" : "", key,
+                     value);
+    if (n <= 0 || (size_t)n >= left)
+        return -1;
+    *offset += (size_t)n;
+    return 0;
+}
+
+/* 生成 meta 命令参数字段；空字段省略，正常启动不会伪造 run/session。 */
 static inline size_t sl_session_meta_format_args(const sl_session_meta_t *meta,
                                                  char *dst, size_t cap) {
     if (!meta || !dst || cap == 0)
         return 0;
-    int n = snprintf(dst, cap,
-                     "%s=%s\t%s=%s\t%s=%s\t%s=%s\t%s=%s\t%s=%s\t%s=%s",
-                     SL_META_RUN_KEY, meta->run,
-                     SL_META_SESSION_KEY, meta->session,
-                     SL_META_CONTENT_KEY, meta->content,
-                     SL_META_ID_KEY, meta->id,
-                     SL_META_BV_KEY, meta->bv,
-                     SL_META_CID_KEY, meta->cid,
-                     SL_META_QN_KEY, meta->qn);
-    if (n <= 0 || (size_t)n >= cap)
+    size_t offset = 0;
+    dst[0] = '\0';
+    if (append_meta_field(dst, cap, &offset, SL_META_RUN_KEY, meta->run) ||
+        append_meta_field(dst, cap, &offset, SL_META_SESSION_KEY, meta->session) ||
+        append_meta_field(dst, cap, &offset, SL_META_CONTENT_KEY, meta->content) ||
+        append_meta_field(dst, cap, &offset, SL_META_ID_KEY, meta->id) ||
+        append_meta_field(dst, cap, &offset, SL_META_BV_KEY, meta->bv) ||
+        append_meta_field(dst, cap, &offset, SL_META_CID_KEY, meta->cid) ||
+        append_meta_field(dst, cap, &offset, SL_META_QN_KEY, meta->qn))
         return 0;
-    return (size_t)n;
+    return offset;
 }
 
 /* ---- D28 同步元数据 ----
@@ -198,6 +217,7 @@ static inline size_t sl_session_meta_format_args(const sl_session_meta_t *meta,
 #define SL_SYNC_KEY_DESIRED    "desired"
 #define SL_SYNC_REASON_MAX     32
 #define SL_SYNC_DESIRED_MAX    8
+#define SL_SYNC_REASON_PAUSE_RESUME "pause_resume"
 #define SL_SYNC_DESIRED_PLAY   "play"
 #define SL_SYNC_DESIRED_PAUSE  "pause"
 
@@ -232,6 +252,9 @@ static inline int sl_sync_meta_assign(sl_sync_meta_t *meta,
     if (strcmp(key, SL_SYNC_KEY_EPOCH) == 0) {
         char *end = NULL;
         errno = 0;
+        if (value[0] == '-' || value[0] == '+' ||
+            !isdigit((unsigned char)value[0]))
+            return -1;
         unsigned long long v = strtoull(value, &end, 10);
         if (errno || !end || *end || v == 0)
             return -1;
@@ -299,6 +322,14 @@ static inline int sl_sync_meta_parse_kv_list(const char *list, char sep,
     }
     if (!hasEpoch && !hasTarget && !hasReason && !hasDesired)
         return 0;
+    /* pending 只允许初始 pause：compat 创建 epoch 时 SlPlayer 尚未采样
+     * 冻结位置；其他操作的 meta 必须携带已解析的目标。 */
+    if (hasTarget && meta->target_ms == SL_SYNC_TARGET_PENDING &&
+        !(hasReason &&
+          strcmp(meta->reason, SL_SYNC_REASON_PAUSE_RESUME) == 0 &&
+          hasDesired &&
+          strcmp(meta->desired, SL_SYNC_DESIRED_PAUSE) == 0))
+        return -1;
     return hasEpoch && hasTarget && hasReason && hasDesired ? 1 : -1;
 }
 

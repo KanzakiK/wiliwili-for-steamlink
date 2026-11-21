@@ -48,6 +48,20 @@ int main(void) {
     CHECK(strstr(args, "qn=64") != NULL);
 
     CHECK(sl_session_meta_parse_extra("start=120", &meta) == 0);
+    /* 正常启动：只有内容身份，无 run/session，也不能被当成完整 session。 */
+    CHECK(sl_session_meta_parse_extra(
+              "content=video,id=BV1PROD,bv=BV1PROD,cid=123,start_ms=0",
+              &meta) == 0);
+    CHECK(sl_session_meta_has_identity(&meta) == 1);
+    CHECK(meta.run[0] == '\0');
+    CHECK(meta.session[0] == '\0');
+    CHECK(strcmp(meta.bv, "BV1PROD") == 0);
+    memset(args, 0, sizeof(args));
+    CHECK(sl_session_meta_format_args(&meta, args, sizeof(args)) > 0);
+    CHECK(strstr(args, "run=") == NULL);
+    CHECK(strstr(args, "session=") == NULL);
+    CHECK(strstr(args, "content=video") == args);
+    CHECK(strstr(args, "bv=BV1PROD") != NULL);
     CHECK(sl_session_meta_parse_extra(
               "run=20261119-120000-1234,session=s1,content=video,id=", &meta) == -1);
     CHECK(sl_session_meta_parse_extra(
@@ -123,6 +137,23 @@ int main(void) {
     CHECK(sl_sync_meta_parse_kv_list(
               "epoch=1\ttarget_ms=2\treason=seek\tdesired=running",
               SL_IPC_FIELD_SEP, &sync) == -1);
+
+    /* D28 收口 E：epoch 不接受符号；pending 目标只允许初始 pause。 */
+    CHECK(sl_sync_meta_parse_kv_list(
+              "epoch=-1\ttarget_ms=2\treason=seek\tdesired=play",
+              SL_IPC_FIELD_SEP, &sync) == -1);
+    CHECK(sl_sync_meta_parse_kv_list(
+              "epoch=+1\ttarget_ms=2\treason=seek\tdesired=play",
+              SL_IPC_FIELD_SEP, &sync) == -1);
+    CHECK(sl_sync_meta_parse_kv_list(
+              "epoch=1\ttarget_ms=-1\treason=seek\tdesired=pause",
+              SL_IPC_FIELD_SEP, &sync) == -1);
+    CHECK(sl_sync_meta_parse_kv_list(
+              "epoch=1\ttarget_ms=-1\treason=pause_resume\tdesired=play",
+              SL_IPC_FIELD_SEP, &sync) == -1);
+    CHECK(sl_sync_meta_parse_kv_list(
+              "epoch=1\treason=pause_resume\tdesired=pause\ttarget_ms=-1",
+              SL_IPC_FIELD_SEP, &sync) == 1);
 
     /* pending context 只允许正确 (gen, req) 消费一次；错配立即丢弃。 */
     sl_sync_context_t context;

@@ -118,8 +118,14 @@ static int validate_frames(char frames[][FRAME_CAP], int count) {
         } else if (metas == 1) {
             if (strstr(frames[i], "run=compat-probe") ||
                 !strstr(frames[i], "epoch=2") ||
-                !strstr(frames[i], "target_ms=5123")) {
-                fprintf(stderr, "FAIL: second meta must be sync-only\n");
+                !strstr(frames[i], "target_ms=5123") ||
+                !strstr(frames[i], "content=video") ||
+                !strstr(frames[i], "id=BV1PROD") ||
+                !strstr(frames[i], "bv=BV1PROD") ||
+                !strstr(frames[i], "cid=123") ||
+                !strstr(frames[i], "qn=64")) {
+                fprintf(stderr,
+                        "FAIL: second meta must carry identity without session\n");
                 return 1;
             }
         } else if (metas == 2) {
@@ -276,11 +282,14 @@ int main(int argc, char **argv) {
     pthread_join(noise, NULL);
     usleep(300000);
 
-    /* 第二次 loadfile 不带 D27 session：sync meta 必须独立发送。 */
+    /* 第二次 loadfile 不带 debug session：内容身份必须随 sync meta 独立发送。 */
     const char *args2[] = {
         "loadfile",
         "https://example.invalid/v2.m4s",
-        "replace", "start=5.123,target_ms=5123", NULL};
+        "replace",
+        "start=5.123,target_ms=5123,content=video,id=BV1PROD,bv=BV1PROD,"
+        "cid=123,qn=64",
+        NULL};
     if (mpv_command_async(ctx, 2, args2) < 0) return 1;
     usleep(300000);
 

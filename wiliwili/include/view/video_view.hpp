@@ -174,10 +174,12 @@ public:
     /// 番剧自定义菜单信息
     void setBangumiCustomSetting(const std::string& title, uint64_t seasonId);
 
-    // D27: debug session；只在 SL_DEBUG_RUN_ID 存在时生效
-    void setDebugSession(const std::string& content, const std::string& id,
-                         const std::string& detail = "", const std::string& bv = "",
-                         const std::string& cid = "", const std::string& qn = "");
+    // 内容身份正常启动也记录；run/session 只在 SL_DEBUG_RUN_ID 存在时生成
+    void setContentIdentity(const std::string& content, const std::string& id,
+                            const std::string& detail = "",
+                            const std::string& bv = "",
+                            const std::string& cid = "",
+                            const std::string& qn = "");
     static std::string getDebugRun();
     static std::string getDebugSession();
 

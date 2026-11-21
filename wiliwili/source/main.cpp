@@ -249,17 +249,22 @@ int main(int argc, char* argv[]) {
             std::string args = getenv("SL_DEBUG_ARGS") ? getenv("SL_DEBUG_ARGS") : "";
             int timeout = atoi(d27Arg(args, "timeout").c_str());
             if (timeout <= 0) timeout = 30;
+            bool noHistory = d27Arg(args, "no_history") == "1";
+            VideoDetail::DEBUG_NO_HISTORY = noHistory;
 
             std::string debugContentType = "page";
             std::string debugContentId = content;
             std::string debugContentBv;
             std::string debugContentDetail = "target=" + content;
+            uint64_t debugContentCid = 0;
             if (content.rfind("video:", 0) == 0) {
                 std::string value = content.substr(6);
                 size_t cidPos = value.find(':');
                 debugContentType = "video";
                 debugContentId = cidPos == std::string::npos ? value : value.substr(0, cidPos);
                 debugContentBv = debugContentId;
+                if (cidPos != std::string::npos)
+                    debugContentCid = strtoull(value.c_str() + cidPos + 1, nullptr, 10);
                 debugContentDetail = cidPos == std::string::npos
                                          ? "bv=" + debugContentBv
                                          : "bv=" + debugContentBv +
@@ -287,12 +292,15 @@ int main(int argc, char* argv[]) {
                 wiliwili::d27::reuseOrBeginSession("page", debugContentId,
                                                    debugContentDetail);
             }
+            int debugProgress = noHistory ? 0 : -1;
             if (content.rfind("video:", 0) == 0)
-                Intent::openBV(debugContentId);
+                Intent::openBV(debugContentId, debugContentCid, debugProgress);
             else if (content.rfind("season:ep:", 0) == 0)
-                Intent::openSeasonByEpId(strtoull(content.substr(10).c_str(), nullptr, 10));
+                Intent::openSeasonByEpId(
+                    strtoull(content.substr(10).c_str(), nullptr, 10), debugProgress);
             else if (content.rfind("season:", 0) == 0)
-                Intent::openSeasonBySeasonId(strtoull(content.substr(7).c_str(), nullptr, 10));
+                Intent::openSeasonBySeasonId(
+                    strtoull(content.substr(7).c_str(), nullptr, 10), debugProgress);
             else if (content.rfind("live:", 0) == 0)
                 Intent::openLive(atoi(content.substr(5).c_str()));
             else if (content.rfind("dynamic:", 0) == 0)
@@ -303,7 +311,9 @@ int main(int argc, char* argv[]) {
                 Intent::openSearch(content.substr(12));
             else if (content.rfind("page:collection:", 0) == 0)
                 Intent::openCollection(content.substr(16));
-            d27Log("CMD", scene, "status=start content=" + content);
+            d27Log("CMD", scene,
+                   "status=start content=" + content +
+                       " no_history=" + (noHistory ? "1" : "0"));
 
             if (scene == "page_nav" || scene == "none") {
                 brls::delay(500, [scene]() {

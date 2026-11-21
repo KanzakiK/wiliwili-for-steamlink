@@ -108,6 +108,9 @@ public:
                        int type = 3);
     inline static bool REPORT_HISTORY = true;
 
+    // D27 debug-only：`--arg no_history=1` 时禁止读取历史进度，正式启动恒为 false。
+    inline static bool DEBUG_NO_HISTORY = false;
+
     /// 视频可以投币的数量
     int getCoinTolerate();
 

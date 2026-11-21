@@ -162,6 +162,10 @@ struct mpv_handle {
     /* 断连恢复所需的播放快照 */
     int hasLastOpen;
     char lastOpenCmd[65536];
+    int hasPendingOpen;
+    char pendingOpenCmd[65536];
+    double pendingOpenStart;
+    char pendingOpenDesired[8];
     int playbackActive;       /* 是否处于可恢复播放（EOF/stop 后为 0）*/
     int expectedPause;        /* UI 期望的暂停态 */
     int restorePausePending;  /* 重启恢复后，等 PLAYBACK_START 再补发 pause */
@@ -365,6 +369,17 @@ static int split_fields(char *s, char *fields[], int max) {
         p = tab + 1;
     }
     return n;
+}
+
+static void parse_open_identity(const char *cmd, uint64_t *gen, uint64_t *req) {
+    if (!cmd || !gen || !req) return;
+    char copy[65536];
+    char *fields[4];
+    snprintf(copy, sizeof(copy), "%s", cmd);
+    int n = split_fields(copy, fields, 4);
+    if (n < 3) return;
+    *gen = strtoull(fields[1], NULL, 10);
+    *req = strtoull(fields[2], NULL, 10);
 }
 
 /* ================= 事件队列 ================= */
@@ -1115,6 +1130,39 @@ static int recover_daemon_connection(mpv_handle *ctx) {
         return -1;
     }
 
+    /* watchdog 重启窗口里 UI 可能已经下发新 loadfile，但当时 socket 还没恢复，
+     * meta/open 发送失败。重连成功后优先补发该新 open，避免自动降级的新流丢失。
+     * 代次/请求号用帧里的原值，保证与 UI 当前 session 一致。 */
+    int hasPendingOpen = 0;
+    char pendingOpen[65536];
+    double pendingStart = 0.0;
+    char pendingDesired[8] = SL_SYNC_DESIRED_PLAY;
+    pthread_mutex_lock(&ctx->daemonMutex);
+    hasPendingOpen = ctx->hasPendingOpen;
+    if (hasPendingOpen) {
+        snprintf(pendingOpen, sizeof(pendingOpen), "%s", ctx->pendingOpenCmd);
+        pendingStart = ctx->pendingOpenStart;
+        snprintf(pendingDesired, sizeof(pendingDesired), "%s",
+                 ctx->pendingOpenDesired);
+        ctx->hasPendingOpen = 0;
+        ctx->pendingOpenCmd[0] = '\0';
+    }
+    pthread_mutex_unlock(&ctx->daemonMutex);
+    if (hasPendingOpen) {
+        uint64_t pendingGen = 0, pendingReq = 0;
+        parse_open_identity(pendingOpen, &pendingGen, &pendingReq);
+        d27_log(ctx, "COMPAT", pendingGen, pendingReq,
+                "pending loadfile replay status=sent target_ms=%lld desired=%s",
+                (long long)llround(pendingStart * 1000.0),
+                strcmp(pendingDesired, SL_SYNC_DESIRED_PAUSE) == 0 ? "pause"
+                                                                   : "play");
+        if (send_session_meta_and_open(ctx, pendingGen, pendingReq, pendingOpen,
+                                       "open", (int64_t)llround(pendingStart * 1000.0),
+                                       pendingDesired) != MPV_ERROR_SUCCESS)
+            d27_log(ctx, "COMPAT", pendingGen, pendingReq,
+                    "pending loadfile replay status=error");
+    }
+
     /* watchdog 强杀恢复时，UI 可能需要一个事件循环才把自动降级决定送到
      * compat。给一个短决策窗口，避免旧流 replay 抢先发出；非 hard 恢复不等待。 */
     if (hasReplay && strcmp(reason, "watchdog 强杀") == 0) {
@@ -1626,6 +1674,8 @@ static void *rx_thread(void *arg) {
             sync_end_epoch_locked(ctx, "ok", "eof");
             ctx->playbackActive = 0;
             ctx->hasLastOpen = 0; /* 自然结束后 daemon 再死不应重开旧视频 */
+            ctx->hasPendingOpen = 0;
+            ctx->pendingOpenCmd[0] = '\0';
             ctx->hasInitialSeekTarget = 0;
             pthread_mutex_unlock(&ctx->daemonMutex);
             /* 播放结束：恢复不透明，避免 UI 透出没有视频的空视频平面（黑底） */
@@ -1657,6 +1707,8 @@ static void *rx_thread(void *arg) {
             sync_end_epoch_locked(ctx, "error", "playback_error");
             ctx->playbackActive = 0;
             ctx->hasLastOpen = 0;
+            ctx->hasPendingOpen = 0;
+            ctx->pendingOpenCmd[0] = '\0';
             ctx->hasInitialSeekTarget = 0;
             pthread_mutex_unlock(&ctx->daemonMutex);
             transparency_disable(ctx);
@@ -2005,7 +2057,14 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
             if (strcmp(args[i], "0") != 0 && strchr(args[i], '=')) { extra = args[i]; break; }
         }
         sl_session_meta_t session;
-        int hasSession = sl_session_meta_parse_extra(extra, &session) == 1;
+        int parseRc = sl_session_meta_parse_extra(extra, &session);
+        int hasIdentity = sl_session_meta_has_identity(&session);
+        if (parseRc < 0) {
+            d27_log(ctx, "COMPAT", 0, 0,
+                    "loadfile identity parse failed; continue without identity");
+            sl_session_meta_clear(&session);
+            hasIdentity = 0;
+        }
         double openStart = 0.0;
         int64_t targetMs = -1;
         int64_t pausedHint = 0;
@@ -2059,6 +2118,8 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
         pthread_mutex_lock(&ctx->daemonMutex);
         snprintf(ctx->lastOpenCmd, sizeof(ctx->lastOpenCmd), "%s", frame);
         ctx->hasLastOpen = 1;
+        ctx->hasPendingOpen = 0;
+        ctx->pendingOpenCmd[0] = '\0';
         ctx->playbackActive = 0; /* 首帧到达后才让 watchdog 接管 */
         ctx->expectedPause = pausedHint ? 1 : 0;
         /* 暂停中切清晰度的新流不能被 UI 的 FILE_LOADED 自动 resume 抢先恢复；
@@ -2073,7 +2134,7 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
         ctx->lastResumeMs = monotonicMs();
         pthread_mutex_lock(&ctx->metaMutex);
         ctx->sessionMeta = session;
-        ctx->hasSessionMeta = hasSession;
+        ctx->hasSessionMeta = hasIdentity;
         pthread_mutex_unlock(&ctx->metaMutex);
         pthread_mutex_unlock(&ctx->daemonMutex);
         clear_queued_events(ctx);
@@ -2088,15 +2149,31 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
         d27_log(ctx, "COMPAT", openGen, openReq,
                 "loadfile url=%s extra_keys=%s content=%s id=%s bv=%s cid=%s qn=%s",
                 safeUrl, safeKeys,
-                hasSession && session.content[0] ? session.content : "-",
-                hasSession && session.id[0] ? session.id : "-",
-                hasSession && session.bv[0] ? session.bv : "-",
-                hasSession && session.cid[0] ? session.cid : "-",
-                hasSession && session.qn[0] ? session.qn : "-");
-        return send_session_meta_and_open(ctx, openGen, openReq, frame, "open",
-                                          (int64_t)llround(openStart * 1000.0),
-                                          pausedHint ? SL_SYNC_DESIRED_PAUSE
-                                                     : SL_SYNC_DESIRED_PLAY);
+                session.content[0] ? session.content : "-",
+                session.id[0] ? session.id : "-",
+                session.bv[0] ? session.bv : "-",
+                session.cid[0] ? session.cid : "-",
+                session.qn[0] ? session.qn : "-");
+        int openRc = send_session_meta_and_open(
+            ctx, openGen, openReq, frame, "open",
+            (int64_t)llround(openStart * 1000.0),
+            pausedHint ? SL_SYNC_DESIRED_PAUSE : SL_SYNC_DESIRED_PLAY);
+        if (openRc != MPV_ERROR_SUCCESS) {
+            pthread_mutex_lock(&ctx->daemonMutex);
+            snprintf(ctx->pendingOpenCmd, sizeof(ctx->pendingOpenCmd), "%s",
+                     frame);
+            ctx->pendingOpenStart = openStart;
+            snprintf(ctx->pendingOpenDesired, sizeof(ctx->pendingOpenDesired),
+                     "%s",
+                     pausedHint ? SL_SYNC_DESIRED_PAUSE : SL_SYNC_DESIRED_PLAY);
+            ctx->hasPendingOpen = 1;
+            pthread_mutex_unlock(&ctx->daemonMutex);
+            d27_log(ctx, "COMPAT", openGen, openReq,
+                    "loadfile open deferred reason=daemon_disconnected "
+                    "target_ms=%lld",
+                    (long long)llround(openStart * 1000.0));
+        }
+        return openRc;
     }
     if (strcmp(cmd, "set") == 0) {
         const char *prop = args[1] ? args[1] : "";
@@ -2254,6 +2331,8 @@ int mpv_command_async(mpv_handle *ctx, uint64_t reply_userdata, const char **arg
         ctx->fileGeneration++;
         ctx->playbackActive = 0;
         ctx->hasLastOpen = 0;
+        ctx->hasPendingOpen = 0;
+        ctx->pendingOpenCmd[0] = '\0';
         ctx->expectedPause = 0;
         ctx->hasInitialSeekTarget = 0;
         pthread_mutex_unlock(&ctx->daemonMutex);

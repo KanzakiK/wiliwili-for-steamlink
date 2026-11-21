@@ -807,21 +807,29 @@ void VideoView::invalidate() { View::invalidate(); }
 
 void VideoView::onLayout() { brls::View::onLayout(); }
 
-// D27: 由 UI 侧生成权威 session，只在 SL_DEBUG_RUN_ID 存在时生效。
-void VideoView::setDebugSession(const std::string& content, const std::string& id,
-                                const std::string& detail, const std::string& bv,
-                                const std::string& cid, const std::string& qn) {
-    const char* run = getenv("SL_DEBUG_RUN_ID");
-    if (!run || !*run) return;
-    std::string detailText = detail;
-    debugRun = run;
-    debugSession = wiliwili::d27::reuseOrBeginSession(content, id, detailText, bv);
+// 内容身份是正常启动日志的一部分；run/session 只在 debug run 下生成。
+void VideoView::setContentIdentity(const std::string& content,
+                                   const std::string& id,
+                                   const std::string& detail,
+                                   const std::string& bv,
+                                   const std::string& cid,
+                                   const std::string& qn) {
     debugContent = content;
     debugId = id;
     debugCid = cid;
     debugQn = qn;
     debugDetail = detail;
     debugBv = bv;
+
+    const char* run = getenv("SL_DEBUG_RUN_ID");
+    if (!run || !*run) {
+        debugRun.clear();
+        debugSession.clear();
+        wiliwili::d27::logContentIdentity(content, id, detail, bv, cid, qn);
+        return;
+    }
+    debugRun = run;
+    debugSession = wiliwili::d27::reuseOrBeginSession(content, id, detail, bv);
 }
 
 std::string VideoView::getDebugRun() { return debugRun; }
@@ -861,16 +869,19 @@ std::string VideoView::genExtraUrlParam(double start, int end, const std::vector
         extra += ",pause=1";
     }
     for (auto& audio : audios) extra += fmt::format(",audio-file=\"{}\"", audio);
-    if (!debugRun.empty()) {
-        extra += fmt::format(",run={},session={},content={},id={}",
-                             debugRun, debugSession, debugContent, debugId);
-        if (!debugBv.empty())
-            extra += fmt::format(",bv={}", debugBv);
-        if (!debugCid.empty())
-            extra += fmt::format(",cid={}", debugCid);
-        if (!debugQn.empty())
-            extra += fmt::format(",qn={}", debugQn);
-    }
+    // 正常启动也必须能追溯内容身份；debug run 才额外带 run/session。
+    if (!debugContent.empty())
+        extra += fmt::format(",content={}", debugContent);
+    if (!debugId.empty())
+        extra += fmt::format(",id={}", debugId);
+    if (!debugBv.empty())
+        extra += fmt::format(",bv={}", debugBv);
+    if (!debugCid.empty())
+        extra += fmt::format(",cid={}", debugCid);
+    if (!debugQn.empty())
+        extra += fmt::format(",qn={}", debugQn);
+    if (!debugRun.empty())
+        extra += fmt::format(",run={},session={}", debugRun, debugSession);
     return extra;
 }
 

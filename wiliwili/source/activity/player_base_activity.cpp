@@ -215,7 +215,11 @@ private:
 void BasePlayerActivity::onContentAvailable() { this->setCommonData(); }
 
 void BasePlayerActivity::setCommonData() {
-    // 视频评论
+    if (VideoDetail::DEBUG_NO_HISTORY) {
+        // 阻止 presenter 迟到的 LAST_TIME 覆盖强制 0 秒起播。
+        this->video->setLastPlayedPosition(VideoView::POSITION_DISCARD);
+        wiliwili::d27::log("UI", "debug no_history=1 status=sent");
+    }
     recyclingGrid->registerCell("Cell", []() { return VideoComment::create(); });
 
     recyclingGrid->registerCell("Reply", []() { return VideoCommentReply::create(); });
@@ -796,6 +800,9 @@ void BasePlayerActivity::onVideoPlayUrl(const bilibili::VideoUrlResult& result) 
     double start = controlTargetMs >= 0
                        ? (double)controlTargetMs / 1000.0
                        : (double)this->getProgress();
+    // 只禁止历史进度；显式控制目标（seek/自动降级）必须保留。
+    if (VideoDetail::DEBUG_NO_HISTORY && controlTargetMs < 0)
+        start = 0;
     if (controlTargetMs < 0) {
         controlTargetMs = (int64_t)(start * 1000.0 + 0.5);
         this->video->setControlTargetMs(controlTargetMs);
@@ -894,11 +901,11 @@ void BasePlayerActivity::onVideoPlayUrl(const bilibili::VideoUrlResult& result) 
                                  episodeResult.aid, result.quality, width, height,
                                  fps.empty() ? "-" : fps, start);
         }
-        this->video->setDebugSession(content, id, detail, bvid,
-                                     std::to_string(seasonInfo.season_id > 0
-                                                        ? episodeResult.cid
-                                                        : videoDetailPage.cid),
-                                     std::to_string(result.quality));
+        this->video->setContentIdentity(
+            content, id, detail, bvid,
+            std::to_string(seasonInfo.season_id > 0 ? episodeResult.cid
+                                                    : videoDetailPage.cid),
+            std::to_string(result.quality));
 
         if (autoDowngradePending)
             autoDowngradeNewSession = wiliwili::d27::currentSession();

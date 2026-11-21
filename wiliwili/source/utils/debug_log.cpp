@@ -24,6 +24,12 @@ bool g_controllerSession = false;
 bool g_ended = false;
 bool g_started = false;
 bool g_exitHookInstalled = false;
+bool g_identityActive = false;
+std::string g_identityContent;
+std::string g_identityId;
+std::string g_identityBv;
+std::string g_identityCid;
+std::string g_identityQn;
 
 std::string timestamp() {
     auto now = std::chrono::system_clock::now();
@@ -181,7 +187,20 @@ void prepareControllerSession(const std::string& content, const std::string& id,
 void endSession(const std::string& reason) {
     std::string message;
     std::unique_lock<std::mutex> lock(g_mutex);
-    if (g_session.empty() || g_ended || !g_started) return;
+    if (g_session.empty()) {
+        /* 正常启动没有 debug session，但内容身份日志也要成对收尾。 */
+        if (!g_identityActive) return;
+        g_identityActive = false;
+        message = "content end reason=" + reason +
+                  " content=" + g_identityContent + " id=" + g_identityId +
+                  " bv=" + valueOrDash(g_identityBv) +
+                  " cid=" + valueOrDash(g_identityCid) +
+                  " qn=" + valueOrDash(g_identityQn);
+        lock.unlock();
+        emitLog("-", "-", "UI", message);
+        return;
+    }
+    if (g_ended || !g_started) return;
     g_ended = true;
     g_started = false;
     message = "content end reason=" + reason + " content=" + g_content +
@@ -216,6 +235,27 @@ void log(const char* source, const std::string& message) {
         session = g_session;
     }
     emitLog(run, session, source, message);
+}
+
+void logContentIdentity(const std::string& content, const std::string& id,
+                        const std::string& detail, const std::string& bv,
+                        const std::string& cid, const std::string& qn) {
+    // 生产日志不带 run/session，但内容身份必须可追溯；debug run 下由
+    // beginSession/reuseOrBeginSession 输出正式 content start，不重复写这里。
+    if (!runId().empty()) return;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        g_identityActive = true;
+        g_identityContent = content;
+        g_identityId = id;
+        g_identityBv = bv;
+        g_identityCid = cid;
+        g_identityQn = qn;
+    }
+    std::string message = "content start content=" + content + " id=" + id +
+                          " bv=" + valueOrDash(bv) + " cid=" + valueOrDash(cid) +
+                          " qn=" + valueOrDash(qn) + " detail=" + detail;
+    emitLog("-", "-", "UI", message);
 }
 
 } // namespace d27

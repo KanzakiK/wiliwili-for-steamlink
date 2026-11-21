@@ -291,7 +291,8 @@ void VideoDetail::requestVideoUrl(const std::string& bvid, uint64_t cid, bool re
     // 请求弹幕
     this->requestVideoDanmaku(cid);
     // 请求分P详情 （字幕链接/历史播放记录）
-    this->requestVideoPageDetail(bvid, cid, requestHistoryInfo);
+    this->requestVideoPageDetail(bvid, cid,
+                                 requestHistoryInfo && !DEBUG_NO_HISTORY);
     // 请求高能进度条
     this->requestHighlightProgress(cid);
     // 请求视频快照（缩略图）
@@ -329,7 +330,8 @@ void VideoDetail::requestSeasonVideoUrl(const std::string& bvid, uint64_t cid, b
     // 请求弹幕
     this->requestVideoDanmaku(cid);
     // 请求分P详情 （字幕链接/历史播放记录）
-    this->requestVideoPageDetail(bvid, cid, requestHistoryInfo);
+    this->requestVideoPageDetail(bvid, cid,
+                                 requestHistoryInfo && !DEBUG_NO_HISTORY);
     // 请求高能进度条
     this->requestHighlightProgress(cid);
     // 请求视频快照（缩略图）

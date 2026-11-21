@@ -376,7 +376,7 @@ void LiveActivity::onLiveData(const bilibili::LiveRoomPlayInfo &result)
         auto url = i.host + liveUrl.base_url + i.extra;
 
         // D27: 直播权威标识是 room id，不使用 BV/oid 反推。
-        this->video->setDebugSession(
+        this->video->setContentIdentity(
             "live", std::to_string(liveData.roomid),
             fmt::format("room_id={} uid={} title={} qn={}", liveData.roomid,
                         liveRoomPlayInfo.uid, liveData.title, liveUrl.current_qn),
