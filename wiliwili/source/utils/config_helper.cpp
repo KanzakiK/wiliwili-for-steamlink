@@ -13,6 +13,7 @@
 #endif
 
 #include <cmath>
+#include <cstdlib>
 #include <borealis/core/application.hpp>
 #include <borealis/core/cache_helper.hpp>
 #include <borealis/core/touch/pan_gesture.hpp>
@@ -114,6 +115,18 @@ unsigned int sceLibcHeapSize             = 24 * 1024 * 1024;
 #endif
 
 using namespace brls::literals;
+
+static std::vector<int> makeAudioSyncOffsetValues() {
+    std::vector<int> values;
+    for (int ms = 0; ms <= 1000; ms += 25) values.push_back(ms);
+    return values;
+}
+
+static std::vector<std::string> makeAudioSyncOffsetLabels() {
+    std::vector<std::string> labels;
+    for (int ms = 0; ms <= 1000; ms += 25) labels.push_back(std::to_string(ms) + "ms");
+    return labels;
+}
 
 std::unordered_map<SettingItem, ProgramOption> ProgramConfig::SETTING_MAP = {
     /// string
@@ -260,6 +273,8 @@ std::unordered_map<SettingItem, ProgramOption> ProgramConfig::SETTING_MAP = {
     {SettingItem::VIDEO_CODEC, {"video_codec", {"AVC/H.264"}, {7}, 0}},
     {SettingItem::AUDIO_QUALITY,
      {"audio_quality", {"High", "Medium", "Low"}, {30280, 30232, 30216}, WILI_AUDIO_QUALITY_DEFAULT}},
+    {SettingItem::PLAYER_AUDIO_SYNC_OFFSET_MS,
+     {"player_audio_sync_offset_ms", makeAudioSyncOffsetLabels(), makeAudioSyncOffsetValues(), 12}}, // 默认 300ms
     {SettingItem::DANMAKU_FILTER_LEVEL,
      {"danmaku_filter_level", {"1", "2", "3", "4", "5", "6", "7", "8", "9", "10"}, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, 0}},
     {SettingItem::DANMAKU_STYLE_AREA, {"danmaku_style_area", {"1/4", "1/2", "3/4", "1"}, {25, 50, 75, 100}, 0}}, // SteamLinkDanmakuDefault
@@ -1081,6 +1096,7 @@ void ProgramConfig::init() {
 
     // load config from disk
     this->load();
+    this->applyAudioSyncOffsetEnv(false);
 
     // init custom font path
     brls::FontLoader::USER_FONT_PATH = getConfigDir() + "/font.ttf";
@@ -1264,6 +1280,24 @@ void ProgramConfig::setProxy(const std::string& proxy) {
 
 void ProgramConfig::setTlsVerify(bool verify) {
     BILI::setTlsVerify(verify);
+}
+
+void ProgramConfig::applyAudioSyncOffsetEnv(bool force) {
+    // debug --sync-offset-ms 始终是最高优先级；正式模式下，设置页改值需要
+    // 覆盖 ProgramConfig::init() 先前从配置写入的同一个环境变量。
+    const char* debugRun = std::getenv("SL_DEBUG_RUN_ID");
+    if (debugRun && *debugRun) return;
+    if (!force && std::getenv("SL_SYNC_AUDIO_OFFSET_MS")) return;
+    int offset = getIntOption(SettingItem::PLAYER_AUDIO_SYNC_OFFSET_MS);
+    if (offset < 0) offset = 0;
+    if (offset > 1000) offset = 1000;
+    const std::string value = std::to_string(offset);
+#ifdef _WIN32
+    _putenv_s("SL_SYNC_AUDIO_OFFSET_MS", value.c_str());
+#else
+    setenv("SL_SYNC_AUDIO_OFFSET_MS", value.c_str(), 1);
+#endif
+    brls::Logger::info("Audio sync offset: {}ms (source: config)", offset);
 }
 
 void ProgramConfig::addSeasonCustomSetting(const std::string& key, const SeasonCustomItem& item) {

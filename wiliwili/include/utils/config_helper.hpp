@@ -70,6 +70,7 @@ enum class SettingItem {
     VIDEO_FORMAT,
     VIDEO_CODEC,
     AUDIO_QUALITY,
+    PLAYER_AUDIO_SYNC_OFFSET_MS, // 音画启动偏移，毫秒
     GAMEPAD_VIBRATION,
     DANMAKU_ON,
     DANMAKU_FILTER_LEVEL,
@@ -271,6 +272,7 @@ public:
     void setProxy(const std::string& proxy);
 
     void setTlsVerify(bool value);
+    void applyAudioSyncOffsetEnv(bool force = false);
 
     void addSeasonCustomSetting(const std::string& key, const SeasonCustomItem& item);
 

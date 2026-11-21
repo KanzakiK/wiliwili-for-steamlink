@@ -27,6 +27,7 @@
         "format": "Format",
         "video_codec": "Video Codec",
         "audio_quality": "Audio Quality",
+        "audio_sync_offset": "Audio sync offset",
         "video_format": "Video format",
         "dolby": "Dolby Atmos",
         "hi_res": "Hi-Res",

@@ -27,6 +27,7 @@
         "format": "格式",
         "video_codec": "视频编码",
         "audio_quality": "视频音质",
+        "audio_sync_offset": "音画同步偏移",
         "video_format": "视频格式",
         "dolby": "杜比全景声",
         "hi_res": "Hi-Res 无损",

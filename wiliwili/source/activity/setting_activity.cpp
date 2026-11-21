@@ -592,6 +592,22 @@ void SettingActivity::onContentAvailable() {
             return true;
         });
 
+    /// Audio sync offset (0-1000ms, single global startup delay)
+    auto syncOffsetOption = conf.getOptionData(SettingItem::PLAYER_AUDIO_SYNC_OFFSET_MS);
+    selectorAudioSyncOffset->init(
+        "wiliwili/setting/app/playback/audio_sync_offset"_i18n,
+        syncOffsetOption.optionList,
+        conf.getIntOptionIndex(SettingItem::PLAYER_AUDIO_SYNC_OFFSET_MS),
+        [syncOffsetOption](int data) {
+            ProgramConfig::instance().setSettingItem(
+                SettingItem::PLAYER_AUDIO_SYNC_OFFSET_MS,
+                syncOffsetOption.rawOptionList[data]);
+            // debug --sync-offset-ms 始终优先；正式模式立即更新环境变量
+            ProgramConfig::instance().applyAudioSyncOffsetEnv(true);
+            MPVCore::instance().restart();
+            return true;
+        });
+
     /// VideoFormat
     auto formatOption = conf.getOptionData(SettingItem::VIDEO_FORMAT);
     selectorFormat->init("wiliwili/setting/app/playback/video_format"_i18n, formatOption.optionList,
